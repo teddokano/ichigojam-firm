@@ -68,10 +68,10 @@ static const io_pin_t OUT_PINS[6] = {
 
 // IN1-4
 static const io_pin_t IN_PINS[4] = {
-	{ GPIO0, PORT0, 10U },  // IN1 = P0_10 (D8)
-	{ GPIO0, PORT0, 11U },  // IN2 = P0_11 (D9)
-	{ GPIO0, PORT0, 12U },  // IN3 = P0_12 (D10)
-	{ GPIO0, PORT0, 13U },  // IN4 = P0_13 (D11)
+	{ GPIO3, PORT3, 15U },  // IN1 = P3_15 (D8)
+	{ GPIO3, PORT3, 14U },  // IN2 = P3_14 (D9)
+	{ GPIO2, PORT2,  6U },  // IN3 = P2_6  (D10)
+	{ GPIO2, PORT2, 13U },  // IN4 = P2_13 (D11)
 };
 
 // BTN = SW2 (P3_29, active-low)
