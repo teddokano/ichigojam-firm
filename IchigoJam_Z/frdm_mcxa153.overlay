@@ -1,0 +1,14 @@
+/*
+ * IchigoJam_Z - FRDM-MCXA153 device tree overlay
+ *
+ * Base DTS already provides:
+ *   lpuart0: console at 115200 baud (zephyr,console)
+ *   lpi2c0:  I2C (arduino_i2c alias)
+ *   lpadc0:  ADC
+ *   gpio0-3: enabled
+ *   storage_partition: 16KB at 0x1c000
+ *   flexpwm0_pwm0: PWM (sound, M3)
+ *
+ * This overlay has no additions for M0/M1.
+ * GPIO/PWM pin assignments are added in M2/M3.
+ */

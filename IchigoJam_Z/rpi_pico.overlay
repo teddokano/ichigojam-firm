@@ -1,0 +1,27 @@
+/*
+ * IchigoJam_Z - Raspberry Pi Pico device tree overlay
+ *
+ * The base rpi_pico BSP already configures:
+ *   uart0: GPIO0 (TX), GPIO1 (RX), 115200 baud
+ *   i2c0:  GPIO4 (SDA), GPIO5 (SCL)
+ *   gpio0: enabled
+ *
+ * This overlay overrides pwm_ch4b pinctrl from GPIO25 (LED) to
+ * GPIO20 (SOUND output) for the PSG timer thread (M3).
+ */
+
+#include <zephyr/dt-bindings/pinctrl/rpi-pico-rp2040-pinctrl.h>
+
+&pwm {
+	status = "okay";
+	pinctrl-0 = <&pwm_ch2a_sound>;
+	pinctrl-names = "default";
+};
+
+&pinctrl {
+	pwm_ch2a_sound: pwm_ch2a_sound {
+		group1 {
+			pinmux = <PWM_2A_P20>;
+		};
+	};
+};

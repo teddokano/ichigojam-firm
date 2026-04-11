@@ -32,6 +32,7 @@
 #define PLATFORM_GD32VF103     7
 #define PLATFORM_SPRESENSE     8
 #define PLATFORM_CONSOLE      10
+#define PLATFORM_RP2040_ZEPHYR 11
 
 //#define AUTO_LRUN0
 
