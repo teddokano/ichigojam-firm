@@ -19,7 +19,7 @@ void flash_init(void)
     const struct flash_area *fa;
     struct flash_pages_info info;
 
-    if (flash_area_open(FIXED_PARTITION_ID(storage_partition), &fa) != 0) {
+    if (flash_area_open(PARTITION_ID(storage_partition), &fa) != 0) {
         return;
     }
 
