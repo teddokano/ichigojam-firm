@@ -11,6 +11,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/i2c.h>
+#include <zephyr/drivers/pwm.h>
 
 // --- GPIO specs from DT overlay (zephyr,user node) ---
 //
@@ -201,12 +202,74 @@ S_INLINE void IJB_clo(void) {
     io_init();
 }
 
-// --- PWM stub (implemented in M3) ---
-void IJB_pwm(int port, int plen, int len) {
+// --- PWM output on OUT1-5 ---
+//
+// PWM port,plen{,len}
+//   port : 1-5  →  OUT1-OUT5
+//   plen : pulse width 0-2000 (0.01 ms units;  1000 = 1 ms)
+//   len  : period (default/0 → 2000 = 20 ms = 50 Hz, suits servo motors)
+//
+// Implementation note (RP2040):
+//   Zephyr has no public API to switch a GPIO pin's mux to PWM at runtime.
+//   We write directly to IO_BANK0 GPIO_CTRL[n].FUNCSEL (4=PWM, 5=SIO).
+//   pwm_off() / IJB_out() restore FUNCSEL to SIO before reconfiguring GPIO.
+//   RP2040 PWM channel number = gpio_pin % 16 (slices repeat every 16 pins).
+//
+//     OUT1=GPIO8  → ch 8    OUT2=GPIO9  → ch 9
+//     OUT3=GPIO10 → ch 10   OUT4=GPIO11 → ch 11
+//     OUT5=GPIO22 → ch 6   (22 % 16 = 6)
+
+#if DT_NODE_EXISTS(DT_NODELABEL(pwm)) && defined(CONFIG_SOC_SERIES_RP2040)
+
+#define _RP2040_IO_BANK0 0x40014000UL
+#define _IJ_FUNC_PWM     4U
+#define _IJ_FUNC_SIO     5U
+
+static void _ij_gpio_func(uint32_t pin, uint32_t func)
+{
+    /* IO_BANK0: GPIO_STATUS at base+pin*8, GPIO_CTRL at base+pin*8+4 */
+    volatile uint32_t *ctrl =
+        (volatile uint32_t *)(_RP2040_IO_BANK0 + pin * 8U + 4U);
+    *ctrl = (*ctrl & ~0x1FU) | (func & 0x1FU);
 }
 
-S_INLINE void pwm_off(int port) {
+void IJB_pwm(int port, int plen, int len)
+{
+    if (port < 1 || port > 6) return;
+    if (plen < 0)        plen = 0;
+    if (plen > PLEN_MAX) plen = PLEN_MAX;
+    if (len  <= 0)       len  = PLEN_MAX;  /* 2000 × 0.01 ms = 20 ms */
+
+    /* Convert 0.01 ms units to nanoseconds */
+    uint32_t period_ns = (uint32_t)len  * 10000U;
+    uint32_t pulse_ns  = (uint32_t)plen * 10000U;
+    if (pulse_ns > period_ns) pulse_ns = period_ns;
+
+    const struct device *pwm_dev = DEVICE_DT_GET(DT_NODELABEL(pwm));
+    if (!device_is_ready(pwm_dev)) return;
+
+    uint32_t pin = (uint32_t)_out_spec[port - 1].pin;
+    uint32_t ch  = pin % 16U;  /* RP2040 PWM slice mapping */
+
+    pwm_set(pwm_dev, ch, period_ns, pulse_ns, PWM_POLARITY_NORMAL);
+    _ij_gpio_func(pin, _IJ_FUNC_PWM);  /* switch pin mux to PWM function */
 }
+
+S_INLINE void pwm_off(int port)
+{
+    if (port < 1 || port > 6) return;
+    /* Restore SIO function so gpio_pin_configure_dt() takes effect */
+    _ij_gpio_func((uint32_t)_out_spec[port - 1].pin, _IJ_FUNC_SIO);
+    IJB_out(port, 0);
+}
+
+#else
+
+/* Non-RP2040 or no PWM node: stub */
+void IJB_pwm(int port, int plen, int len) { (void)port; (void)plen; (void)len; }
+S_INLINE void pwm_off(int port) { (void)port; }
+
+#endif /* PWM + RP2040 */
 
 // --- I2C stub (implemented in M4) ---
 S_INLINE int IJB_i2c(uint8 writemode, uint16 *param) {
