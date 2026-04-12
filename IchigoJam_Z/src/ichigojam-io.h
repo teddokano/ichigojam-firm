@@ -263,13 +263,62 @@ S_INLINE void pwm_off(int port)
     IJB_out(port, 0);
 }
 
+#elif DT_NODE_HAS_STATUS(DT_NODELABEL(flexpwm0_pwm0), okay) && \
+      DT_NODE_HAS_STATUS(DT_NODELABEL(flexpwm0_pwm1), okay) && \
+      DT_NODE_HAS_STATUS(DT_NODELABEL(flexpwm0_pwm2), okay)
+
+// frdm_mcxa153: dedicated FlexPWM pins, separate from OUT GPIO.
+// No runtime pinmux switching needed.
+//
+//   port 1,2 → flexpwm0_pwm0 (sm0) ch 0,1 → P3_6,  P3_7
+//   port 3,4 → flexpwm0_pwm1 (sm1) ch 0,1 → P3_8,  P3_9
+//   port 5,6 → flexpwm0_pwm2 (sm2) ch 0,1 → P3_10, P3_11
+//
+// sm1 and sm2 have independent period registers → no interference with
+// sound (ctimer0) or with each other.
+
+static const struct device * const _ij_flexpwm[] = {
+    DEVICE_DT_GET(DT_NODELABEL(flexpwm0_pwm0)),  /* port 1,2 */
+    DEVICE_DT_GET(DT_NODELABEL(flexpwm0_pwm1)),  /* port 3,4 */
+    DEVICE_DT_GET(DT_NODELABEL(flexpwm0_pwm2)),  /* port 5,6 */
+};
+
+void IJB_pwm(int port, int plen, int len)
+{
+    if (port < 1 || port > 6) return;
+    if (plen < 0)        plen = 0;
+    if (plen > PLEN_MAX) plen = PLEN_MAX;
+    if (len  <= 0)       len  = PLEN_MAX;  /* 2000 × 0.01 ms = 20 ms */
+
+    uint32_t period_ns = (uint32_t)len  * 10000U;
+    uint32_t pulse_ns  = (uint32_t)plen * 10000U;
+    if (pulse_ns > period_ns) pulse_ns = period_ns;
+
+    int dev_idx = (port - 1) / 2;  /* 0=sm0, 1=sm1, 2=sm2 */
+    uint32_t ch = (uint32_t)(port - 1) % 2U;  /* 0=chA, 1=chB */
+
+    const struct device *dev = _ij_flexpwm[dev_idx];
+    if (!device_is_ready(dev)) return;
+    pwm_set(dev, ch, period_ns, pulse_ns, PWM_POLARITY_NORMAL);
+}
+
+S_INLINE void pwm_off(int port)
+{
+    if (port < 1 || port > 6) return;
+    int dev_idx = (port - 1) / 2;
+    uint32_t ch = (uint32_t)(port - 1) % 2U;
+    const struct device *dev = _ij_flexpwm[dev_idx];
+    if (!device_is_ready(dev)) return;
+    pwm_set(dev, ch, 10000000U, 0U, PWM_POLARITY_NORMAL);
+}
+
 #else
 
-/* Non-RP2040 or no PWM node: stub */
+/* No supported PWM hardware: stub */
 void IJB_pwm(int port, int plen, int len) { (void)port; (void)plen; (void)len; }
 S_INLINE void pwm_off(int port) { (void)port; }
 
-#endif /* PWM + RP2040 */
+#endif /* PWM implementations */
 
 // --- I2C stub (implemented in M4) ---
 S_INLINE int IJB_i2c(uint8 writemode, uint16 *param) {

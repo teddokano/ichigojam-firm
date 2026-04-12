@@ -7,10 +7,65 @@
  *   lpadc0:  ADC
  *   gpio0-3: enabled
  *   storage_partition: 16KB at 0x1c000
- *   flexpwm0_pwm0: PWM (sound, M3)
+ *   flexpwm0_pwm0: P3_6/P3_7  → PWM 1/2 (sm0 chA/B)
+ *
+ * This overlay adds:
+ *   ctimer0:        sound output → D13 / P2_12 (CT0_MAT0)
+ *   flexpwm0_pwm1:  PWM 3/4    → P3_8  / P3_9  (sm1 chA/B)
+ *   flexpwm0_pwm2:  PWM 5/6    → P3_10 / P3_11 (sm2 chA/B)
  */
 
 #include <zephyr/dt-bindings/gpio/gpio.h>
+
+/* Sound: CTimer0, CT0_MAT0 → D13 (P2_12) */
+&ctimer0 {
+	compatible = "nxp,ctimer-pwm";
+	status = "okay";
+	pinctrl-0 = <&ctimer0_sound>;
+	pinctrl-names = "default";
+	#pwm-cells = <3>;
+	prescaler = <1>;
+};
+
+/* PWM 3/4: FlexPWM0 sub-module 1 → P3_8 (chA) / P3_9 (chB) */
+&flexpwm0_pwm1 {
+	status = "okay";
+	pinctrl-0 = <&flexpwm0_pwm1_pins>;
+	pinctrl-names = "default";
+};
+
+/* PWM 5/6: FlexPWM0 sub-module 2 → P3_10 (chA) / P3_11 (chB) */
+&flexpwm0_pwm2 {
+	status = "okay";
+	pinctrl-0 = <&flexpwm0_pwm2_pins>;
+	pinctrl-names = "default";
+};
+
+&pinctrl {
+	ctimer0_sound: ctimer0_sound {
+		group0 {
+			pinmux = <CT0_MAT0_P2_12>;
+			drive-strength = "high";
+			slew-rate = "fast";
+		};
+	};
+
+	flexpwm0_pwm1_pins: flexpwm0_pwm1_pins {
+		group0 {
+			pinmux = <PWM0_A1_P3_8>, <PWM0_B1_P3_9>;
+			drive-strength = "low";
+			slew-rate = "fast";
+		};
+	};
+
+	flexpwm0_pwm2_pins: flexpwm0_pwm2_pins {
+		group0 {
+			pinmux = <PWM0_A2_P3_10>, <PWM0_B2_P3_11>;
+			drive-strength = "low";
+			slew-rate = "fast";
+		};
+	};
+};
 
 / {
 	zephyr,user {

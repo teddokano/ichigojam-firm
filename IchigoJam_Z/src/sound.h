@@ -14,12 +14,19 @@
 #include <zephyr/drivers/pwm.h>
 
 // Board-specific PWM selection
+//   rpi_pico    : &pwm           slice 2 chA → GPIO20
+//   frdm_mcxa153: &ctimer0       CT0_MAT0    → D13 / P2_12  (sound moved off FlexPWM)
+//   fallback    : &flexpwm0_pwm0 sm0 chA     → P3_6
 #if DT_NODE_EXISTS(DT_NODELABEL(pwm))
 #  define SOUND_PWM_NODE DT_NODELABEL(pwm)
-#  define SOUND_PWM_CHAN 4U   /* slice 2, channel A → GPIO20 */
+#  define SOUND_PWM_CHAN 4U   /* rpi_pico: slice 2, channel A → GPIO20 */
+#elif DT_NODE_EXISTS(DT_NODELABEL(ctimer0)) && \
+      DT_NODE_HAS_COMPAT(DT_NODELABEL(ctimer0), nxp_ctimer_pwm)
+#  define SOUND_PWM_NODE DT_NODELABEL(ctimer0)
+#  define SOUND_PWM_CHAN 0U   /* frdm_mcxa153: CT0_MAT0 → D13 (P2_12) */
 #elif DT_NODE_EXISTS(DT_NODELABEL(flexpwm0_pwm0))
 #  define SOUND_PWM_NODE DT_NODELABEL(flexpwm0_pwm0)
-#  define SOUND_PWM_CHAN 0U   /* sub-module 0, channel A → P3_6 */
+#  define SOUND_PWM_CHAN 0U   /* fallback: sub-module 0, channel A → P3_6 */
 #endif
 
 #ifdef SOUND_PWM_NODE
