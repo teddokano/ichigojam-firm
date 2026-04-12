@@ -1,0 +1,7 @@
+10 print "beep and wait test"
+20 for i=0 to 9
+30 beep 20*(i%2+1),6
+40 wait 54
+50 next
+110 print "sound test"
+120 play "CDEFGAB"
