@@ -16,7 +16,8 @@
 #define PSG_TICK_PER_SEC 60
 
 #define IJB_VER_STR 1.4
-#define IJB_TITLE "IchigoJam BASIC " STRING2(IJB_VER_STR) " rp2040 Zephyr\n"
+
+#define IJB_TITLE "IchigoJam BASIC " STRING2(IJB_VER_STR) " Zephyr " CONFIG_BOARD "\n"
 
 #define VER_PLATFORM PLATFORM_RP2040_ZEPHYR
 
