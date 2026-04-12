@@ -54,6 +54,24 @@
 	};
 };
 
+/ {
+	zephyr,user {
+		/* IchigoJam GPIO pin assignments for Raspberry Pi Pico */
+		ij-led-gpios  = <&gpio0 25 GPIO_ACTIVE_HIGH>;   /* onboard LED */
+		ij-btn-gpios  = <&gpio0 28 GPIO_ACTIVE_LOW>;    /* BTN, pull-up */
+		ij-out1-gpios = <&gpio0  8 GPIO_ACTIVE_HIGH>;
+		ij-out2-gpios = <&gpio0  9 GPIO_ACTIVE_HIGH>;
+		ij-out3-gpios = <&gpio0 10 GPIO_ACTIVE_HIGH>;
+		ij-out4-gpios = <&gpio0 11 GPIO_ACTIVE_HIGH>;
+		ij-out5-gpios = <&gpio0 22 GPIO_ACTIVE_HIGH>;
+		ij-out6-gpios = <&gpio0 21 GPIO_ACTIVE_HIGH>;
+		ij-in1-gpios  = <&gpio0 27 GPIO_ACTIVE_HIGH>;   /* ADC ch1 */
+		ij-in2-gpios  = <&gpio0 26 GPIO_ACTIVE_HIGH>;   /* ADC ch0 */
+		ij-in3-gpios  = <&gpio0  6 GPIO_ACTIVE_HIGH>;
+		ij-in4-gpios  = <&gpio0  7 GPIO_ACTIVE_HIGH>;
+	};
+};
+
 &adc {
 	status = "okay";
 	#address-cells = <1>;
