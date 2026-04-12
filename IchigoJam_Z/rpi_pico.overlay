@@ -6,11 +6,39 @@
  *   i2c0:  GPIO4 (SDA), GPIO5 (SCL)
  *   gpio0: enabled
  *
- * This overlay overrides pwm_ch4b pinctrl from GPIO25 (LED) to
- * GPIO20 (SOUND output) for the PSG timer thread (M3).
+ * This overlay:
+ *   - Defines flash partitions (app: 1.75MB, storage: 256KB)
+ *   - Overrides pwm_ch4b pinctrl from GPIO25 (LED) to
+ *     GPIO20 (SOUND output) for the PSG timer thread (M3).
+ *   - Enables ADC for IN1(GPIO27), IN2(GPIO26), BTN(GPIO28)
  */
 
 #include <zephyr/dt-bindings/pinctrl/rpi-pico-rp2040-pinctrl.h>
+
+/*
+ * Flash partitions: 2MB total, last 256KB reserved for NVS storage.
+ * The base rpi_pico-common.dtsi defines code_partition spanning all
+ * usable flash. We delete it and redefine it smaller, then add
+ * storage_partition in the freed space.
+ */
+&flash0 {
+	partitions {
+		/delete-node/ partition@100;
+
+		/* Application code: 0x100 .. 0x1BFFFF (1.75MB - 256B) */
+		code_partition: partition@100 {
+			label = "code-partition";
+			reg = <0x00000100 (DT_SIZE_K(1792) - 0x100)>;
+			read-only;
+		};
+
+		/* NVS storage: last 256KB (64 sectors x 4KB) */
+		storage_partition: partition@1C0000 {
+			label = "storage";
+			reg = <0x001C0000 DT_SIZE_K(256)>;
+		};
+	};
+};
 
 &pwm {
 	status = "okay";
@@ -23,5 +51,38 @@
 		group1 {
 			pinmux = <PWM_2A_P20>;
 		};
+	};
+};
+
+&adc {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <10>;
+		zephyr,input-positive = <0>;  /* IN2: GPIO26 = ADC ch0 */
+	};
+
+	channel@1 {
+		reg = <1>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <10>;
+		zephyr,input-positive = <1>;  /* IN1: GPIO27 = ADC ch1 */
+	};
+
+	channel@2 {
+		reg = <2>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <10>;
+		zephyr,input-positive = <2>;  /* BTN: GPIO28 = ADC ch2 */
 	};
 };
