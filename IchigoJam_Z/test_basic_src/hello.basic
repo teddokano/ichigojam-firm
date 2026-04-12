@@ -1,0 +1,4 @@
+10 print "Hello, world!"
+20 for i=0 to 9
+30 print i
+40 next

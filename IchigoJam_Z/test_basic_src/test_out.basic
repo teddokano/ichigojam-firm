@@ -1,0 +1,6 @@
+10 print "LED test"
+20 for i=0 to 20
+30 print i
+40 led i%2
+50 wait 6
+60 next

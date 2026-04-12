@@ -1,0 +1,7 @@
+10 print "IN test"
+20 print in(1);in(2);in(3);in(4)
+30 wait 30
+40 goto 20
+
+
+
