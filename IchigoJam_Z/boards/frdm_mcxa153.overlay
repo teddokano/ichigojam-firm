@@ -73,14 +73,14 @@
 		 * Using Arduino header pins. LEDs are active LOW.
 		 * See pinmap/frdm_mcxa153.txt for connector layout.
 		 */
-		ij-led-gpios  = <&gpio3 12 GPIO_ACTIVE_LOW>;    /* RED LED (D5) */
+		ij-led-gpios  = <&gpio3 12 GPIO_ACTIVE_LOW>;    /* RED LED (D5, shared with OUT4) */
 		ij-btn-gpios  = <&gpio3 29 GPIO_ACTIVE_LOW>;    /* SW2 */
 		ij-out1-gpios = <&gpio2  4 GPIO_ACTIVE_HIGH>;   /* D2 */
-		ij-out2-gpios = <&gpio2  5 GPIO_ACTIVE_HIGH>;   /* D4 */
-		ij-out3-gpios = <&gpio3  1 GPIO_ACTIVE_HIGH>;   /* D7 */
-		ij-out4-gpios = <&gpio3 15 GPIO_ACTIVE_HIGH>;   /* D8 */
-		ij-out5-gpios = <&gpio3 14 GPIO_ACTIVE_HIGH>;   /* D9 */
-		ij-out6-gpios = <&gpio2  6 GPIO_ACTIVE_HIGH>;   /* D10 */
+		ij-out2-gpios = <&gpio3  0 GPIO_ACTIVE_HIGH>;   /* D3 (BLUE LED) */
+		ij-out3-gpios = <&gpio2  5 GPIO_ACTIVE_HIGH>;   /* D4 */
+		ij-out4-gpios = <&gpio3 12 GPIO_ACTIVE_HIGH>;   /* D5 (RED LED, shared with ij-led) */
+		ij-out5-gpios = <&gpio3 13 GPIO_ACTIVE_HIGH>;   /* D6 (GREEN LED) */
+		ij-out6-gpios = <&gpio3  1 GPIO_ACTIVE_HIGH>;   /* D7 */
 		ij-in1-gpios  = <&gpio1 10 GPIO_ACTIVE_HIGH>;   /* A0 */
 		ij-in2-gpios  = <&gpio1 12 GPIO_ACTIVE_HIGH>;   /* A1 */
 		ij-in3-gpios  = <&gpio1 13 GPIO_ACTIVE_HIGH>;   /* A2 */
