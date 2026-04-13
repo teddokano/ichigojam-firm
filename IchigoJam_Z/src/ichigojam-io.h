@@ -111,6 +111,24 @@ void io_init(void)
     {
         const struct device *adc = ADC_DEV;
         if (device_is_ready(adc)) {
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(lpadc0), okay)
+            /* MCXA153 LPADC: reference = VDDA = ADC_REF_EXTERNAL0.
+             * channel_id = slot index (0-3), input_positive = hardware ADC0_An number.
+             * ANA(1)=slot0→A8(P1_10/A0), ANA(2)=slot1→A10(P1_12/A1),
+             * ANA(3)=slot2→A11(P1_13/A2), ANA(4)=slot3→A0(P2_0/A3) */
+            static const uint8_t mcxa_hw_ch[] = { 8, 10, 11, 0 };
+            struct adc_channel_cfg cfg = {
+                .gain             = ADC_GAIN_1,
+                .reference        = ADC_REF_EXTERNAL0,
+                .acquisition_time = ADC_ACQ_TIME_DEFAULT,
+            };
+            for (int i = 0; i < 4; i++) {
+                cfg.channel_id     = i;
+                cfg.input_positive = mcxa_hw_ch[i];
+                adc_channel_setup(adc, &cfg);
+            }
+#else
+            /* RP2040: reference = internal. ch0=GPIO26(IN2), ch1=GPIO27(IN1) */
             struct adc_channel_cfg cfg = {
                 .gain             = ADC_GAIN_1,
                 .reference        = ADC_REF_INTERNAL,
@@ -120,6 +138,7 @@ void io_init(void)
                 cfg.channel_id = ch;
                 adc_channel_setup(adc, &cfg);
             }
+#endif
         }
     }
 #endif
@@ -185,8 +204,15 @@ int IJB_btn(int n)
 
 S_INLINE int IJB_ana(int n)
 {
-    // n=1 or n=9 -> IN1 (RP2040: GPIO27=ADC ch1)
-    // n=2        -> IN2 (RP2040: GPIO26=ADC ch0)
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(lpadc0), okay)
+    /* MCXA153: ANA(n) → slot index 0-3 (set up in io_init with correct input_positive).
+     * ANA(1)/ANA(9)=slot0→A8(A0), ANA(2)=slot1→A10(A1),
+     * ANA(3)=slot2→A11(A2),       ANA(4)=slot3→A0(A3)  */
+    int slot = (n == 9) ? 0 : (n - 1);
+    if (slot < 0 || slot > 3) return 0;
+    return _adc_read(slot);
+#else
+    /* RP2040: ANA(1)/ANA(9)=GPIO27=ch1, ANA(2)=GPIO26=ch0 */
     int ch;
     if (n == 1 || n == 9) {
         ch = 1;
@@ -196,6 +222,7 @@ S_INLINE int IJB_ana(int n)
         return 0;
     }
     return _adc_read(ch);
+#endif
 }
 
 S_INLINE void IJB_clo(void) {

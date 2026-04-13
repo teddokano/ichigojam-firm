@@ -1,7 +1,10 @@
 10 print "ANA test"
-20 print ana(1)
-30 wait 6
-40 goto 20
-
-
-
+20 print ana(1);
+30 print "  ";
+40 print ana(2);
+50 print "  ";
+60 print ana(3);
+70 print "  ";
+80 print ana(4)
+90 wait 6
+100 goto 20

@@ -65,6 +65,18 @@
 			slew-rate = "fast";
 		};
 	};
+
+	/* ADC: add A0/A1/A2 (P1_10/P1_12/P1_13) alongside existing A3 (P2_0) */
+	pinmux_lpadc0: pinmux_lpadc0 {
+		group1 {
+			pinmux = <ADC0_A8_P1_10>,   /* A0 = ANA(1) / IN(1) */
+				 <ADC0_A10_P1_12>,  /* A1 = ANA(2) / IN(2) */
+				 <ADC0_A11_P1_13>;  /* A2 = ANA(3) / IN(3) */
+			drive-strength = "low";
+			slew-rate = "fast";
+		};
+		/* group0: P2_0 = A3 = ANA(4) / IN(4) — defined in board pinctrl.dtsi */
+	};
 };
 
 / {

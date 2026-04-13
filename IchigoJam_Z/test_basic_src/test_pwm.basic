@@ -1,0 +1,4 @@
+10 print "pwm test"
+20 for i=1 to 6
+30 pwm 1,1*100
+40 next
