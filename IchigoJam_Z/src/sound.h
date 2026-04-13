@@ -4,8 +4,9 @@
 // the MML/BEEP state machine, then drives the PWM output via set_tone().
 //
 // Board mapping:
-//   rpi_pico       : &pwm  slice 2, channel A → GPIO20  (Zephyr ch 4)
-//   frdm_mcxa153   : &flexpwm0_pwm0  sub-module 0, channel A → P3_6 (ch 0)
+//   rpi_pico       : &pwm            slice 2, ch A → GPIO20  (Zephyr ch 4)
+//   frdm_mcxa153   : &ctimer0        CT0_MAT0 → P2_12  (ch 0)
+//   frdm_mcxn947   : &flexpwm1_pwm0  sm0 ch A → PIO2_6  (ch 0)
 
 #ifndef __SOUND_H__
 #define __SOUND_H__
@@ -14,19 +15,23 @@
 #include <zephyr/drivers/pwm.h>
 
 // Board-specific PWM selection
-//   rpi_pico    : &pwm           slice 2 chA → GPIO20
-//   frdm_mcxa153: &ctimer0       CT0_MAT0    → D13 / P2_12  (sound moved off FlexPWM)
-//   fallback    : &flexpwm0_pwm0 sm0 chA     → P3_6
-#if DT_NODE_EXISTS(DT_NODELABEL(pwm))
+//   rpi_pico     : &pwm            slice 2 chA → GPIO20
+//   frdm_mcxa153 : &ctimer0        CT0_MAT0    → D13 / P2_12
+//   frdm_mcxn947 : &flexpwm1_pwm0  sm0 chA     → PIO2_6
+//   fallback     : &flexpwm0_pwm0  sm0 chA     → P3_6
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(pwm), okay)
 #  define SOUND_PWM_NODE DT_NODELABEL(pwm)
 #  define SOUND_PWM_CHAN 4U   /* rpi_pico: slice 2, channel A → GPIO20 */
 #elif DT_NODE_EXISTS(DT_NODELABEL(ctimer0)) && \
       DT_NODE_HAS_COMPAT(DT_NODELABEL(ctimer0), nxp_ctimer_pwm)
 #  define SOUND_PWM_NODE DT_NODELABEL(ctimer0)
 #  define SOUND_PWM_CHAN 0U   /* frdm_mcxa153: CT0_MAT0 → D13 (P2_12) */
-#elif DT_NODE_EXISTS(DT_NODELABEL(flexpwm0_pwm0))
+#elif DT_NODE_HAS_STATUS(DT_NODELABEL(flexpwm1_pwm0), okay)
+#  define SOUND_PWM_NODE DT_NODELABEL(flexpwm1_pwm0)
+#  define SOUND_PWM_CHAN 0U   /* frdm_mcxn947: sm0 chA → PIO2_6 */
+#elif DT_NODE_HAS_STATUS(DT_NODELABEL(flexpwm0_pwm0), okay)
 #  define SOUND_PWM_NODE DT_NODELABEL(flexpwm0_pwm0)
-#  define SOUND_PWM_CHAN 0U   /* fallback: sub-module 0, channel A → P3_6 */
+#  define SOUND_PWM_CHAN 0U   /* fallback: sm0 chA → P3_6 */
 #endif
 
 #ifdef SOUND_PWM_NODE

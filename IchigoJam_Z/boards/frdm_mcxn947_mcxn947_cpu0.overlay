@@ -1,0 +1,165 @@
+/*
+ * IchigoJam_Z - FRDM-MCXN947 device tree overlay
+ *
+ * Base DTS (frdm_mcxn947_mcxn947_cpu0.dtsi) already provides:
+ *   flexcomm4_lpuart4: console at 115200 baud (zephyr,console)
+ *   flexcomm2_lpi2c2:  arduino_i2c
+ *   lpadc0:            ADC (status okay, vref okay)
+ *   gpio0-5:           enabled
+ *   flexpwm1_pwm0:     sm0 chA/B → PIO2_6 / PIO2_7  (sound)
+ *   flash + w25q64:    w25q64 carries storage_partition (external, 8 MB)
+ *
+ * This overlay:
+ *   - Moves storage_partition to internal flash (last 64 KB of 2 MB)
+ *   - Enables flexpwm1_pwm1 (OUT1/2 PWM) → PIO2_4 / PIO2_5
+ *   - Enables flexpwm1_pwm2 (OUT3/4 PWM) → PIO2_2 / PIO2_3
+ *   - Overrides lpadc0 pinctrl to Arduino A2 (PIO0_14) / A3 (PIO0_22)
+ *   - Defines two ADC channel nodes for IN1 / IN2
+ *   - Sets vref to HIGH_POWER mode (required by LPADC)
+ *   - Assigns IchigoJam GPIO functions to Arduino header pins
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/mcux-lpadc.h>
+#include <zephyr/dt-bindings/regulator/nxp_vref.h>
+
+/* -----------------------------------------------------------------------
+ * Storage: move storage_partition from WINBOND external flash to the
+ * last 64 KB of the 2 MB internal flash (8 sectors × 8 KB erase block).
+ * The existing slot1_partition covers this range but is unused without
+ * MCUboot.  IchigoJam binaries are well under 1 MB.
+ * ----------------------------------------------------------------------- */
+/delete-node/ &storage_partition;
+
+&flash {
+	partitions {
+		storage_partition: partition@1F0000 {
+			label = "storage";
+			reg = <0x001F0000 DT_SIZE_K(64)>;
+		};
+	};
+};
+
+/* -----------------------------------------------------------------------
+ * OUT PWM: FlexPWM1 sub-modules 1 and 2
+ *   sm1 → PIO2_4 (chA = OUT1) / PIO2_5 (chB = OUT2)
+ *   sm2 → PIO2_2 (chA = OUT3) / PIO2_3 (chB = OUT4)
+ * OUT5 / OUT6 have no dedicated PWM on this board (stubbed in firmware).
+ * ----------------------------------------------------------------------- */
+&flexpwm1_pwm1 {
+	status = "okay";
+	pinctrl-0 = <&flexpwm1_pwm1_ij>;
+	pinctrl-names = "default";
+};
+
+&flexpwm1_pwm2 {
+	status = "okay";
+	pinctrl-0 = <&flexpwm1_pwm2_ij>;
+	pinctrl-names = "default";
+};
+
+/* -----------------------------------------------------------------------
+ * ADC: override lpadc0 pinctrl to Arduino A2 / A3 header pins
+ *   channel 0 (IN1) = PIO0_14 = ADC0_B14 = MCUX_LPADC_CH14B
+ *   channel 1 (IN2) = PIO0_22 = ADC0_A14 = MCUX_LPADC_CH14A
+ * Reference voltage: 1.8 V from on-chip VREF (HIGH_POWER mode).
+ * ----------------------------------------------------------------------- */
+&vref {
+	regulator-initial-mode = <NXP_VREF_MODE_HIGH_POWER>;
+};
+
+&lpadc0 {
+	pinctrl-0 = <&lpadc0_ij>;
+	pinctrl-names = "default";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain             = "ADC_GAIN_1";
+		zephyr,reference        = "ADC_REF_EXTERNAL1";
+		zephyr,vref-mv          = <1800>;
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution       = <12>;
+		zephyr,input-positive   = <MCUX_LPADC_CH14B>; /* IN1: PIO0_14 = Arduino A2 */
+	};
+
+	channel@1 {
+		reg = <1>;
+		zephyr,gain             = "ADC_GAIN_1";
+		zephyr,reference        = "ADC_REF_EXTERNAL1";
+		zephyr,vref-mv          = <1800>;
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution       = <12>;
+		zephyr,input-positive   = <MCUX_LPADC_CH14A>; /* IN2: PIO0_22 = Arduino A3 */
+	};
+};
+
+&pinctrl {
+	flexpwm1_pwm1_ij: flexpwm1_pwm1_ij {
+		group0 {
+			pinmux = <PWM1_A1_PIO2_4>, <PWM1_B1_PIO2_5>;
+			drive-strength = "low";
+			slew-rate = "fast";
+		};
+	};
+
+	flexpwm1_pwm2_ij: flexpwm1_pwm2_ij {
+		group0 {
+			pinmux = <PWM1_A2_PIO2_2>, <PWM1_B2_PIO2_3>;
+			drive-strength = "low";
+			slew-rate = "fast";
+		};
+	};
+
+	/* ADC: Arduino A2 (PIO0_14) and A3 (PIO0_22) */
+	lpadc0_ij: lpadc0_ij {
+		group0 {
+			pinmux = <ADC0_B14_PIO0_14>,  /* IN1: Arduino A2 */
+				 <ADC0_A14_PIO0_22>;  /* IN2: Arduino A3 */
+			drive-strength = "low";
+			slew-rate = "fast";
+		};
+	};
+};
+
+/ {
+	zephyr,user {
+		/*
+		 * IchigoJam GPIO assignments for FRDM-MCXN947 (Arduino header)
+		 *
+		 * LED   = Red LED D9  (gpio0.10, active LOW)
+		 * BTN   = SW2 / A5   (gpio0.23, active LOW)
+		 * OUT1  = D2          gpio0.29
+		 * OUT2  = D3          gpio1.23
+		 * OUT3  = D4          gpio0.30
+		 * OUT4  = D5          gpio1.21
+		 * OUT5  = D6 / Blue   gpio1.2
+		 * OUT6  = D7          gpio0.31
+		 * IN1   = A2          gpio0.14  (ADC0_B14, ch14B)
+		 * IN2   = A3          gpio0.22  (ADC0_A14, ch14A)
+		 * IN3   = A4          gpio0.15
+		 * IN4   = D8          gpio0.28
+		 *
+		 * PWM sound output: PIO2_6 (flexpwm1_pwm0 sm0 chA, already enabled)
+		 * PWM OUT1/2:       PIO2_4 / PIO2_5  (flexpwm1_pwm1)
+		 * PWM OUT3/4:       PIO2_2 / PIO2_3  (flexpwm1_pwm2)
+		 */
+		ij-led-gpios  = <&gpio0 10 GPIO_ACTIVE_LOW>;   /* Red LED (D9) */
+		ij-btn-gpios  = <&gpio0 23 GPIO_ACTIVE_LOW>;   /* SW2 (A5) */
+		ij-out1-gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;  /* D2 */
+		ij-out2-gpios = <&gpio1 23 GPIO_ACTIVE_HIGH>;  /* D3 */
+		ij-out3-gpios = <&gpio0 30 GPIO_ACTIVE_HIGH>;  /* D4 */
+		ij-out4-gpios = <&gpio1 21 GPIO_ACTIVE_HIGH>;  /* D5 */
+		ij-out5-gpios = <&gpio1  2 GPIO_ACTIVE_HIGH>;  /* D6 (also Blue LED) */
+		ij-out6-gpios = <&gpio0 31 GPIO_ACTIVE_HIGH>;  /* D7 */
+		ij-in1-gpios  = <&gpio0 14 GPIO_ACTIVE_HIGH>;  /* A2 / ADC0_B14 */
+		ij-in2-gpios  = <&gpio0 22 GPIO_ACTIVE_HIGH>;  /* A3 / ADC0_A14 */
+		ij-in3-gpios  = <&gpio0 15 GPIO_ACTIVE_HIGH>;  /* A4 */
+		ij-in4-gpios  = <&gpio0 28 GPIO_ACTIVE_HIGH>;  /* D8 */
+
+		/* DT-based ADC channels: index 0 = IN1, index 1 = IN2 */
+		io-channels = <&lpadc0 0>, <&lpadc0 1>;
+	};
+};

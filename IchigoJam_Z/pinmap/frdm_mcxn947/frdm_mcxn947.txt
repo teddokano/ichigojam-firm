@@ -1,0 +1,41 @@
+FRDM-MCXN947 IchigoJam_Z ピンアサイン
+=======================================
+
+Arduino ヘッダ基準でアサイン。LEDはアクティブLOW。
+
+機能     | GPIO     | ピン     | 備考
+---------|----------|----------|---------------------------
+LED      | gpio0.10 | D9       | Red LED (ACTIVE_LOW)
+BTN      | gpio0.23 | A5/SW2   | ACTIVE_LOW
+OUT1     | gpio0.29 | D2       |
+OUT2     | gpio1.23 | D3       |
+OUT3     | gpio0.30 | D4       |
+OUT4     | gpio1.21 | D5       |
+OUT5     | gpio1.2  | D6       | Blue LED 兼用
+OUT6     | gpio0.31 | D7       |
+IN1      | gpio0.14 | A2       | ADC0_B14 (ch14B), ANA(1)
+IN2      | gpio0.22 | A3       | ADC0_A14 (ch14A), ANA(2)
+IN3      | gpio0.15 | A4       | デジタルのみ
+IN4      | gpio0.28 | D8       | デジタルのみ
+
+I2C      | SDA: gpio4.0 / SCL: gpio4.1 | D14/D15 | flexcomm2_lpi2c2
+UART     | TX: PIO1_8 / RX: PIO1_9     | USB-VCOM | flexcomm4_lpuart4 (コンソール)
+
+PWM (音声出力)
+  flexpwm1_pwm0 sm0 chA → PIO2_6 (J8相当)
+
+PWM (OUTピン, BASICの PWM コマンド)
+  OUT1/2: flexpwm1_pwm1 sm1 chA/B → PIO2_4 / PIO2_5
+  OUT3/4: flexpwm1_pwm2 sm2 chA/B → PIO2_2 / PIO2_3
+  OUT5/6: PWM未対応（stub）
+
+フラッシュストレージ (NVS)
+  内部フラッシュ 最後の 64KB (0x1F0000-0x1FFFFF)
+  ※ slot1_partition と重複するが MCUboot 未使用のため問題なし
+
+ADC リファレンス: オンチップ VREF (1.8V HIGH_POWER モード)
+
+ビルドコマンド
+  west build -b frdm_mcxn947/mcxn947/cpu0 \
+    /Users/tedd/dev/Zephyr/ichigojam-firm/IchigoJam_Z \
+    --build-dir /Users/tedd/dev/Zephyr/ichigojam-firm/IchigoJam_Z/build_mcxn947

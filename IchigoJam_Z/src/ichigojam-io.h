@@ -58,19 +58,42 @@ static const struct gpio_dt_spec _btn_spec =
 #define ANA_THRESHOLD (1024 / 4)
 #define PLEN_MAX 2000
 
-// --- ADC (RP2040: "adc", MCXA153: "lpadc0") ---
-#if DT_NODE_EXISTS(DT_NODELABEL(adc))
-#  define ADC_DEV     DEVICE_DT_GET(DT_NODELABEL(adc))
-#  define ADC_ENABLED 1
+// --- ADC ---
+//
+// Two paths depending on the board overlay:
+//
+//   ADC_DT path  (MCXN947): zephyr,user has io-channels property.
+//     Channel specs come from DT; adc_channel_setup_dt() / adc_read().
+//     index 0 = IN1 (ANA(1)), index 1 = IN2 (ANA(2)).
+//
+//   Legacy path (RP2040, MCXA153): programmatic adc_channel_setup()
+//     with raw channel IDs baked into the code.
+//
+#if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), io_channels)
+// DT-based ADC: channel specs sourced from overlay io-channels property
+static const struct adc_dt_spec _adc_dt[] = {
+    ADC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), 0), /* IN1: ANA(1) */
+    ADC_DT_SPEC_GET_BY_IDX(DT_PATH(zephyr_user), 1), /* IN2: ANA(2) */
+};
+#define ADC_DT_ENABLED 1
+#define ADC_ENABLED    0
+
+#elif DT_NODE_EXISTS(DT_NODELABEL(adc))
+#  define ADC_DEV      DEVICE_DT_GET(DT_NODELABEL(adc))
+#  define ADC_ENABLED  1
+#  define ADC_DT_ENABLED 0
+
 #elif DT_NODE_EXISTS(DT_NODELABEL(lpadc0))
-#  define ADC_DEV     DEVICE_DT_GET(DT_NODELABEL(lpadc0))
-#  define ADC_ENABLED 1
+#  define ADC_DEV      DEVICE_DT_GET(DT_NODELABEL(lpadc0))
+#  define ADC_ENABLED  1
+#  define ADC_DT_ENABLED 0
+
 #else
-#  define ADC_ENABLED 0
+#  define ADC_ENABLED    0
+#  define ADC_DT_ENABLED 0
 #endif
 
-// ADC read: channel 0-2, returns 10-bit value (0-1023).
-// RP2040: 12-bit ADC, shift >>2. gpio26=ch0, gpio27=ch1, gpio28=ch2.
+// Legacy ADC read: channel 0-2, returns 10-bit value (0-1023).
 static int _adc_read(int channel)
 {
 #if ADC_ENABLED
@@ -88,6 +111,7 @@ static int _adc_read(int channel)
     if (buf < 0) buf = 0;
     return (int)buf >> 2; // 12-bit -> 10-bit
 #else
+    (void)channel;
     return 0;
 #endif
 }
@@ -107,7 +131,13 @@ void io_init(void)
     // LED: output inactive (gpio_dt_spec handles active-low inversion)
     gpio_pin_configure_dt(&_out_spec[6], GPIO_OUTPUT_INACTIVE);
 
-#if ADC_ENABLED
+#if ADC_DT_ENABLED
+    for (int i = 0; i < (int)ARRAY_SIZE(_adc_dt); i++) {
+        if (device_is_ready(_adc_dt[i].dev)) {
+            adc_channel_setup_dt(&_adc_dt[i]);
+        }
+    }
+#elif ADC_ENABLED
     {
         const struct device *adc = ADC_DEV;
         if (device_is_ready(adc)) {
@@ -185,8 +215,31 @@ int IJB_btn(int n)
 
 S_INLINE int IJB_ana(int n)
 {
-    // n=1 or n=9 -> IN1 (RP2040: GPIO27=ADC ch1)
-    // n=2        -> IN2 (RP2040: GPIO26=ADC ch0)
+    // n=1 or n=9 → IN1 analog,  n=2 → IN2 analog
+#if ADC_DT_ENABLED
+    int idx;
+    if (n == 1 || n == 9) {
+        idx = 0; /* _adc_dt[0]: IN1 */
+    } else if (n == 2) {
+        idx = 1; /* _adc_dt[1]: IN2 */
+    } else {
+        return 0;
+    }
+    if (!device_is_ready(_adc_dt[idx].dev)) {
+        return 0;
+    }
+    int16_t buf = 0;
+    struct adc_sequence seq;
+    adc_sequence_init_dt(&_adc_dt[idx], &seq);
+    seq.buffer      = &buf;
+    seq.buffer_size = sizeof(buf);
+    if (adc_read(_adc_dt[idx].dev, &seq) < 0) {
+        return 0;
+    }
+    if (buf < 0) buf = 0;
+    return (int)buf >> 2; /* 12-bit → 10-bit */
+#else
+    // n=1 or n=9 -> ch=1, n=2 -> ch=0 (legacy channel mapping)
     int ch;
     if (n == 1 || n == 9) {
         ch = 1;
@@ -196,6 +249,7 @@ S_INLINE int IJB_ana(int n)
         return 0;
     }
     return _adc_read(ch);
+#endif
 }
 
 S_INLINE void IJB_clo(void) {
@@ -267,15 +321,10 @@ S_INLINE void pwm_off(int port)
       DT_NODE_HAS_STATUS(DT_NODELABEL(flexpwm0_pwm1), okay) && \
       DT_NODE_HAS_STATUS(DT_NODELABEL(flexpwm0_pwm2), okay)
 
-// frdm_mcxa153: dedicated FlexPWM pins, separate from OUT GPIO.
-// No runtime pinmux switching needed.
-//
+// frdm_mcxa153: dedicated FlexPWM0 pins, separate from OUT GPIO.
 //   port 1,2 → flexpwm0_pwm0 (sm0) ch 0,1 → P3_6,  P3_7
 //   port 3,4 → flexpwm0_pwm1 (sm1) ch 0,1 → P3_8,  P3_9
 //   port 5,6 → flexpwm0_pwm2 (sm2) ch 0,1 → P3_10, P3_11
-//
-// sm1 and sm2 have independent period registers → no interference with
-// sound (ctimer0) or with each other.
 
 static const struct device * const _ij_flexpwm[] = {
     DEVICE_DT_GET(DT_NODELABEL(flexpwm0_pwm0)),  /* port 1,2 */
@@ -288,14 +337,14 @@ void IJB_pwm(int port, int plen, int len)
     if (port < 1 || port > 6) return;
     if (plen < 0)        plen = 0;
     if (plen > PLEN_MAX) plen = PLEN_MAX;
-    if (len  <= 0)       len  = PLEN_MAX;  /* 2000 × 0.01 ms = 20 ms */
+    if (len  <= 0)       len  = PLEN_MAX;
 
     uint32_t period_ns = (uint32_t)len  * 10000U;
     uint32_t pulse_ns  = (uint32_t)plen * 10000U;
     if (pulse_ns > period_ns) pulse_ns = period_ns;
 
-    int dev_idx = (port - 1) / 2;  /* 0=sm0, 1=sm1, 2=sm2 */
-    uint32_t ch = (uint32_t)(port - 1) % 2U;  /* 0=chA, 1=chB */
+    int dev_idx = (port - 1) / 2;
+    uint32_t ch = (uint32_t)(port - 1) % 2U;
 
     const struct device *dev = _ij_flexpwm[dev_idx];
     if (!device_is_ready(dev)) return;
@@ -305,6 +354,49 @@ void IJB_pwm(int port, int plen, int len)
 S_INLINE void pwm_off(int port)
 {
     if (port < 1 || port > 6) return;
+    int dev_idx = (port - 1) / 2;
+    uint32_t ch = (uint32_t)(port - 1) % 2U;
+    const struct device *dev = _ij_flexpwm[dev_idx];
+    if (!device_is_ready(dev)) return;
+    pwm_set(dev, ch, 10000000U, 0U, PWM_POLARITY_NORMAL);
+}
+
+#elif DT_NODE_HAS_STATUS(DT_NODELABEL(flexpwm1_pwm1), okay) && \
+      DT_NODE_HAS_STATUS(DT_NODELABEL(flexpwm1_pwm2), okay)
+
+// frdm_mcxn947: FlexPWM1 sm1/sm2 for OUT PWM; sm0 is reserved for sound.
+//   port 1,2 → flexpwm1_pwm1 (sm1) ch 0,1 → PIO2_4, PIO2_5
+//   port 3,4 → flexpwm1_pwm2 (sm2) ch 0,1 → PIO2_2, PIO2_3
+//   port 5,6 → no dedicated PWM channel on this board (stubbed)
+
+static const struct device * const _ij_flexpwm[] = {
+    DEVICE_DT_GET(DT_NODELABEL(flexpwm1_pwm1)),  /* port 1,2 */
+    DEVICE_DT_GET(DT_NODELABEL(flexpwm1_pwm2)),  /* port 3,4 */
+};
+
+void IJB_pwm(int port, int plen, int len)
+{
+    if (port < 1 || port > 6) return;
+    if (port > 4) return;  /* OUT5/6: no PWM on MCXN947, silently ignore */
+    if (plen < 0)        plen = 0;
+    if (plen > PLEN_MAX) plen = PLEN_MAX;
+    if (len  <= 0)       len  = PLEN_MAX;
+
+    uint32_t period_ns = (uint32_t)len  * 10000U;
+    uint32_t pulse_ns  = (uint32_t)plen * 10000U;
+    if (pulse_ns > period_ns) pulse_ns = period_ns;
+
+    int dev_idx = (port - 1) / 2;  /* 0=sm1(port1,2), 1=sm2(port3,4) */
+    uint32_t ch = (uint32_t)(port - 1) % 2U;
+
+    const struct device *dev = _ij_flexpwm[dev_idx];
+    if (!device_is_ready(dev)) return;
+    pwm_set(dev, ch, period_ns, pulse_ns, PWM_POLARITY_NORMAL);
+}
+
+S_INLINE void pwm_off(int port)
+{
+    if (port < 1 || port > 4) return;
     int dev_idx = (port - 1) / 2;
     uint32_t ch = (uint32_t)(port - 1) % 2U;
     const struct device *dev = _ij_flexpwm[dev_idx];
