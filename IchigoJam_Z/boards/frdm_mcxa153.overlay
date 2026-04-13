@@ -79,6 +79,12 @@
 	};
 };
 
+/* LPI2C0: arduino_i2c alias — enable with 400 kHz */
+&lpi2c0 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+};
+
 / {
 	zephyr,user {
 		/* IchigoJam GPIO pin assignments for FRDM-MCXA153

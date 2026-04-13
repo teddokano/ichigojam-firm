@@ -144,10 +144,6 @@ void io_init(void)
 #endif
 }
 
-int i2c0_init(void) {
-    return 0;
-}
-
 // io_get(): raw physical bitmask (same convention as P version)
 // Uses gpio_pin_get_raw() so active-low flags don't invert the result.
 S_INLINE int io_get(void)
@@ -347,9 +343,68 @@ S_INLINE void pwm_off(int port) { (void)port; }
 
 #endif /* PWM implementations */
 
-// --- I2C stub (implemented in M4) ---
-S_INLINE int IJB_i2c(uint8 writemode, uint16 *param) {
+// --- I2C ---
+//
+// Device selection (compile-time, based on DT status):
+//   RP2040:   i2c0   (GPIO4=SDA, GPIO5=SCL, enabled in overlay)
+//   MCXA153:  lpi2c0 (arduino_i2c alias, enabled in overlay)
+//
+// IJB_i2c(writemode, param):
+//   param[0] = 7-bit I2C address
+//   param[1] = BASIC virtual addr of buf1 (always written first)
+//   param[2] = len of buf1
+//   param[3] = BASIC virtual addr of buf2
+//   param[4] = len of buf2
+//   writemode==0: write buf1, write buf2  (pure write)
+//   writemode==1: write buf1, read  buf2  (register read)
+//   Returns 0 on success, 1 on error.
+
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(i2c0), okay)
+#  define _IJ_I2C_DEV DEVICE_DT_GET(DT_NODELABEL(i2c0))
+#  define _IJ_I2C_ENABLED 1
+#elif DT_NODE_HAS_STATUS(DT_NODELABEL(lpi2c0), okay)
+#  define _IJ_I2C_DEV DEVICE_DT_GET(DT_NODELABEL(lpi2c0))
+#  define _IJ_I2C_ENABLED 1
+#else
+#  define _IJ_I2C_ENABLED 0
+#endif
+
+int i2c0_init(void) {
+#if _IJ_I2C_ENABLED
+    const struct device *dev = _IJ_I2C_DEV;
+    return device_is_ready(dev) ? 0 : 1;
+#else
     return 1;
+#endif
+}
+
+S_INLINE int IJB_i2c(uint8 writemode, uint16 *param) {
+#if _IJ_I2C_ENABLED
+    const struct device *dev = _IJ_I2C_DEV;
+    if (!device_is_ready(dev)) return 1;
+
+    uint8_t addr = (uint8_t)param[0];
+    uint8_t *buf1 = (uint8_t *)(RAM_AREA + param[1] - OFFSET_RAMROM);
+    int len1 = param[2];
+    uint8_t *buf2 = (uint8_t *)(RAM_AREA + param[3] - OFFSET_RAMROM);
+    int len2 = param[4];
+
+    int r;
+    if (writemode) {
+        // read mode: write register address (buf1), read data (buf2)
+        r = i2c_write_read(dev, addr, buf1, (uint32_t)len1,
+                           buf2, (uint32_t)len2);
+    } else {
+        // write mode: write buf1, then write buf2
+        r = i2c_write(dev, buf1, (uint32_t)len1, addr);
+        if (r == 0 && len2 > 0) {
+            r = i2c_write(dev, buf2, (uint32_t)len2, addr);
+        }
+    }
+    return r == 0 ? 0 : 1;
+#else
+    return 1;
+#endif
 }
 
 #endif // __ICHIGOJAM_IO_H__

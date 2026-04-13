@@ -1,0 +1,7 @@
+1 'read LM75B in IchigoJam
+10 poke #700,0
+20 r=i2cr(#4C,#700,1,#702,2)
+30 if r ?"Error"
+40 ? peek(#702);".";(peek(#703)>>5)*125
+50 wait 60
+60 goto 20

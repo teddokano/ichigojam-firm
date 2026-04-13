@@ -1,0 +1,44 @@
+'--- USR() machine code test ---
+'
+' Memory map (BASIC virtual addresses):
+'   #700-#7FF  PCG RAM (writable, safe for machine code)
+'   #800-#8CB  @() array variables (0-101)
+'   #8CC-#9FF  A-Z variables (A=#8CC, B=#8CE, ...)
+'   #C00-      LIST area (overwritten by NEW/program entry)
+'
+' USR(ad, n) calling convention:
+'   R0 = n   (argument / return value)
+'   R1 = mem = RAM_AREA - #700  (BASIC virtual -> real addr base)
+'   R2 = ROM pointer (CHAR_PATTERN)
+'   R3 = __aeabi_uidivmod (soft divide helper)
+'   Code at #700 = RAM_AREA[0], Thumb mode (+1 applied internally)
+'
+'--- Test 1: return constant 42 ---
+' MOVS R0,#42  = #2A #20
+' BX LR        = #70 #47
+POKE #700,#2A,#20,#70,#47
+PRINT USR(#700,0)
+' Expected: 42
+
+'--- Test 2: return argument unchanged ---
+' BX LR = #70 #47
+POKE #700,#70,#47
+PRINT USR(#700,99)
+' Expected: 99
+
+'--- Test 3: return argument + 1 ---
+' ADDS R0,#1  = #01 #30
+' BX LR       = #70 #47
+POKE #700,#01,#30,#70,#47
+PRINT USR(#700,10)
+' Expected: 11
+
+'--- Test 4: read variable A via R1 (RAM access) ---
+' LDRH R0,[R1,R0]  = #08 #5A   (R1+R0 = mem+#8CC = &A)
+' BX LR            = #70 #47
+' Variable A is at BASIC virtual #8CC
+'   (#700 + #100 + 102*2 = #8CC, because A-Z follow 102 @() elements)
+A=123
+POKE #700,#08,#5A,#70,#47
+PRINT USR(#700,#8CC)
+' Expected: 123

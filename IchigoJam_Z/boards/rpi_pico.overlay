@@ -72,6 +72,12 @@
 	};
 };
 
+/* I2C0: GPIO4 (SDA), GPIO5 (SCL) — already pinctrl'd in BSP, just enable */
+&i2c0 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+};
+
 &adc {
 	status = "okay";
 	#address-cells = <1>;
