@@ -1,0 +1,7 @@
+10 print "OUT test"
+20 for i=1 to 6
+30 for j=0 to 4
+40 out i,j%2
+50 next
+60 next
+70 goto 20

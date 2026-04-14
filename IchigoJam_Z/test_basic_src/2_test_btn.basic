@@ -2,6 +2,3 @@
 20 print btn()
 30 wait 6
 40 goto 20
-
-
-
