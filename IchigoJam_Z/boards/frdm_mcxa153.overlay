@@ -13,6 +13,15 @@
  *   ctimer0:        sound output → D13 / P2_12 (CT0_MAT0)
  *   flexpwm0_pwm1:  PWM 3/4    → P3_8  / P3_9  (sm1 chA/B)
  *   flexpwm0_pwm2:  PWM 5/6    → P3_10 / P3_11 (sm2 chA/B)
+ *   ctimer1:        NTSC line timing (raw register access, IRQ 40)
+ *   lpspi0:         NTSC pixel output — SDO=P1_0 (MOSI), SCK=P1_1
+ *                   Pinctrl overridden to SDO+SCK only (PCS0/P1_3 freed
+ *                   for use as SYNC GPIO)
+ *
+ * NTSC composite signal circuit:
+ *   GPIO_SYNC (P1_3) ── 560 Ω ──┐
+ *                                ├── CVBS out ── [75 Ω term] ── GND
+ *   LPSPI0_MOSI(P1_0) ── 270 Ω ──┘
  */
 
 #include <zephyr/dt-bindings/gpio/gpio.h>
@@ -66,6 +75,16 @@
 		};
 	};
 
+	/* LPSPI0 video: SDO (MOSI=P1_0) + SCK (P1_1) only.
+	 * P1_3 (PCS0) intentionally omitted — used as GPIO sync output. */
+	lpspi0_video: lpspi0_video {
+		group0 {
+			pinmux = <LPSPI0_SDO_P1_0>, <LPSPI0_SCK_P1_1>;
+			drive-strength = "high";
+			slew-rate = "fast";
+		};
+	};
+
 	/* ADC: add A0/A1/A2 (P1_10/P1_12/P1_13) alongside existing A3 (P2_0) */
 	pinmux_lpadc0: pinmux_lpadc0 {
 		group1 {
@@ -83,6 +102,19 @@
 &lpi2c0 {
 	status = "okay";
 	clock-frequency = <I2C_BITRATE_FAST>;
+};
+
+/* CTimer1: NTSC line-sync timer (raw register access in display.h) */
+&ctimer1 {
+	status = "okay";
+};
+
+/* LPSPI0: NTSC pixel output at 5.33 MHz (96 MHz / 18).
+ * Pinctrl overridden to SDO+SCK only — PCS0 (P1_3) freed as sync GPIO.
+ * No CS, TX-only.  SCK (P1_1) is internal pixel clock, not wired to TV. */
+&lpspi0 {
+	pinctrl-0 = <&lpspi0_video>;
+	pinctrl-names = "default";
 };
 
 / {
@@ -103,5 +135,8 @@
 		ij-in2-gpios  = <&gpio1 12 GPIO_ACTIVE_HIGH>;   /* A1 */
 		ij-in3-gpios  = <&gpio1 13 GPIO_ACTIVE_HIGH>;   /* A2 */
 		ij-in4-gpios  = <&gpio2  0 GPIO_ACTIVE_HIGH>;   /* A3 / ADC0_A0 */
+		/* NTSC composite sync output: P1_3 (Mikrobus CS).
+		 * GPIO_ACTIVE_LOW: gpio_pin_set_dt(1) → pin LOW = sync tip   */
+		ij-sync-gpios = <&gpio1  3 GPIO_ACTIVE_LOW>;    /* P1_3 (Mikrobus CS) */
 	};
 };
