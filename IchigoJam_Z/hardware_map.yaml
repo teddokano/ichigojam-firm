@@ -1,0 +1,7 @@
+- connected: true
+  id: AM1N3ZFSNDWRL
+  platform: frdm_mcxa153
+  product: FRDM-MCXA153
+  runner: linkserver
+  serial: /dev/cu.usbmodemAM1N3ZFSNDWRL3
+  baud: 115200
