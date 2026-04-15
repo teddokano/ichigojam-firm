@@ -279,7 +279,7 @@ INLINE void video_waitSync(uint n)
     if (n == 0) return;
     uint32_t target = _vframe + (uint32_t)n;
     while (_vframe < target) {
-        k_yield();
+        k_sleep(K_MSEC(1));
     }
 }
 
