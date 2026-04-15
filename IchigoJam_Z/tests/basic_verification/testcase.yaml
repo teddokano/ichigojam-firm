@@ -1,0 +1,17 @@
+sample:
+  name: IchigoJam BASIC Zephyr
+  description: IchigoJam BASIC 1.4 on Zephyr RTOS — boot splash verification
+
+common:
+  harness: console
+  harness_config:
+    type: one_line
+    regex:
+      - "IchigoJam BASIC 1\\.4 Zephyr frdm_mcxa153"
+  timeout: 15
+
+tests:
+  sample.ichigojam.boot:
+    tags: boot splash
+    platform_allow:
+      - frdm_mcxa153
