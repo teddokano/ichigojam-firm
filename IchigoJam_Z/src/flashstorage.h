@@ -4,7 +4,7 @@
 #define __FLASHSTORAGE_H__
 
 #include <zephyr/kernel.h>
-#include <zephyr/kvss/nvs.h>
+#include <zephyr/fs/nvs.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/drivers/flash.h>
 

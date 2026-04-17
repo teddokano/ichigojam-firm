@@ -16,6 +16,7 @@
  */
 
 #include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
 
 /* Sound: CTimer0, CT0_MAT0 → D13 (P2_12) */
 &ctimer0 {
@@ -85,7 +86,28 @@
 	clock-frequency = <I2C_BITRATE_FAST>;
 };
 
+/* Expand storage_partition from 16 KB (2 sectors) to 32 KB (4 × 8 KB sectors).
+ * Binary is ~50 KB at 0x0; 0x18000 (96 KB) leaves ample room for code growth.
+ * Sector size = 8 KB (FSL_FEATURE_SYSCON_FLASH_SECTOR_SIZE_BYTES),
+ * so 4 sectors give NVS ~24 KB of usable space (1 sector reserved for GC).
+ */
+&flash {
+	partitions {
+		/delete-node/ partition@1c000;  /* remove base 16 KB storage */
+
+		storage_partition: partition@18000 {
+			label = "storage";
+			reg = <0x18000 DT_SIZE_K(32)>;
+		};
+	};
+};
+
 / {
+	chosen {
+		ij-adc = <&lpadc0>;  /* ADC device for ANA()/IN() */
+		ij-i2c = <&lpi2c0>; /* I2C device for I2C() command */
+	};
+
 	zephyr,user {
 		/* IchigoJam GPIO pin assignments for FRDM-MCXA153
 		 * Using Arduino header pins. LEDs are active LOW.
@@ -103,5 +125,31 @@
 		ij-in2-gpios  = <&gpio1 12 GPIO_ACTIVE_HIGH>;   /* A1 */
 		ij-in3-gpios  = <&gpio1 13 GPIO_ACTIVE_HIGH>;   /* A2 */
 		ij-in4-gpios  = <&gpio2  0 GPIO_ACTIVE_HIGH>;   /* A3 / ADC0_A0 */
+
+		/*
+		 * PWM specs for IchigoJam sound and OUT PWM outputs.
+		 * Use standard "pwms" property (requires #pwm-cells = <3> on each
+		 * referenced controller) with "pwm-names" for named access.
+		 *
+		 * Index mapping (must match pwm-names order):
+		 *   0 = sound  : ctimer0 ch0 = CT0_MAT0 → D13 (P2_12)
+		 *   1 = out1   : flexpwm0_pwm0 sm0 chA → P3_6
+		 *   2 = out2   : flexpwm0_pwm0 sm0 chB → P3_7
+		 *   3 = out3   : flexpwm0_pwm1 sm1 chA → P3_8
+		 *   4 = out4   : flexpwm0_pwm1 sm1 chB → P3_9
+		 *   5 = out5   : flexpwm0_pwm2 sm2 chA → P3_10
+		 *   6 = out6   : flexpwm0_pwm2 sm2 chB → P3_11
+		 *
+		 * Period values are dummy (1 µs for sound, 20 ms for OUT);
+		 * actual period is always set by pwm_set() at runtime.
+		 */
+		pwms = <&ctimer0       0 1000     PWM_POLARITY_NORMAL>,
+		       <&flexpwm0_pwm0 0 20000000 PWM_POLARITY_NORMAL>,
+		       <&flexpwm0_pwm0 1 20000000 PWM_POLARITY_NORMAL>,
+		       <&flexpwm0_pwm1 0 20000000 PWM_POLARITY_NORMAL>,
+		       <&flexpwm0_pwm1 1 20000000 PWM_POLARITY_NORMAL>,
+		       <&flexpwm0_pwm2 0 20000000 PWM_POLARITY_NORMAL>,
+		       <&flexpwm0_pwm2 1 20000000 PWM_POLARITY_NORMAL>;
+		pwm-names = "sound", "out1", "out2", "out3", "out4", "out5", "out6";
 	};
 };

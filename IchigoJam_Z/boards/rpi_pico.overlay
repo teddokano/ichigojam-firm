@@ -14,6 +14,7 @@
  */
 
 #include <zephyr/dt-bindings/pinctrl/rpi-pico-rp2040-pinctrl.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
 
 /*
  * Flash partitions: 2MB total, last 256KB reserved for NVS storage.
@@ -55,6 +56,11 @@
 };
 
 / {
+	chosen {
+		ij-adc = <&adc>;    /* ADC device for ANA()/IN() */
+		ij-i2c = <&i2c0>;  /* I2C device for I2C() command */
+	};
+
 	zephyr,user {
 		/* IchigoJam GPIO pin assignments for Raspberry Pi Pico */
 		ij-led-gpios  = <&gpio0 25 GPIO_ACTIVE_HIGH>;   /* onboard LED */
@@ -69,6 +75,31 @@
 		ij-in2-gpios  = <&gpio0 26 GPIO_ACTIVE_HIGH>;   /* ADC ch0 */
 		ij-in3-gpios  = <&gpio0  6 GPIO_ACTIVE_HIGH>;
 		ij-in4-gpios  = <&gpio0  7 GPIO_ACTIVE_HIGH>;
+
+		/*
+		 * PWM specs for IchigoJam sound and OUT PWM outputs.
+		 * Use standard "pwms" property (requires #pwm-cells = <3> on &pwm)
+		 * with "pwm-names" for named access via PWM_DT_SPEC_GET_BY_NAME.
+		 *
+		 * RP2040 channel = gpio_pin % 16 (RP2040 PWM driver convention):
+		 *   GPIO20 → ch 4 (sound)
+		 *   GPIO8  → ch 8 (out1),  GPIO9  → ch 9 (out2)
+		 *   GPIO10 → ch10 (out3),  GPIO11 → ch11 (out4)
+		 *   GPIO22 → ch 6 (out5),  GPIO21 → ch 5 (out6)
+		 *
+		 * Runtime pinmux (GPIO→PWM) for OUT pins is set via direct
+		 * IO_BANK0.GPIO_CTRL[n].FUNCSEL register access in ichigojam-io.h
+		 * because Zephyr has no runtime pinmux API.
+		 * Period dummy values; actual period set by pwm_set() at runtime.
+		 */
+		pwms = <&pwm  4 1000     PWM_POLARITY_NORMAL>,  /* sound */
+		       <&pwm  8 20000000 PWM_POLARITY_NORMAL>,  /* out1  */
+		       <&pwm  9 20000000 PWM_POLARITY_NORMAL>,  /* out2  */
+		       <&pwm 10 20000000 PWM_POLARITY_NORMAL>,  /* out3  */
+		       <&pwm 11 20000000 PWM_POLARITY_NORMAL>,  /* out4  */
+		       <&pwm  6 20000000 PWM_POLARITY_NORMAL>,  /* out5  */
+		       <&pwm  5 20000000 PWM_POLARITY_NORMAL>;  /* out6  */
+		pwm-names = "sound", "out1", "out2", "out3", "out4", "out5", "out6";
 	};
 };
 

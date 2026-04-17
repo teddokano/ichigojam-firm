@@ -3,9 +3,11 @@
 // Timer thread fires at 60 Hz (16666 µs), calls psg_tick() to advance
 // the MML/BEEP state machine, then drives the PWM output via set_tone().
 //
-// Board mapping:
-//   rpi_pico       : &pwm  slice 2, channel A → GPIO20  (Zephyr ch 4)
-//   frdm_mcxa153   : &flexpwm0_pwm0  sub-module 0, channel A → P3_6 (ch 0)
+// Board mapping is fully in the DT overlay (zephyr,user / ij-sound-pwms):
+//   rpi_pico       : &pwm  ch 4  (GPIO20 = slice 2, channel A)
+//   frdm_mcxa153   : &ctimer0 ch 0  (CT0_MAT0 → D13 / P2_12)
+//
+// No board-specific labels appear in this file.
 
 #ifndef __SOUND_H__
 #define __SOUND_H__
@@ -13,25 +15,15 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/pwm.h>
 
-// Board-specific PWM selection
-//   rpi_pico    : &pwm           slice 2 chA → GPIO20
-//   frdm_mcxa153: &ctimer0       CT0_MAT0    → D13 / P2_12  (sound moved off FlexPWM)
-//   fallback    : &flexpwm0_pwm0 sm0 chA     → P3_6
-#if DT_NODE_EXISTS(DT_NODELABEL(pwm))
-#  define SOUND_PWM_NODE DT_NODELABEL(pwm)
-#  define SOUND_PWM_CHAN 4U   /* rpi_pico: slice 2, channel A → GPIO20 */
-#elif DT_NODE_EXISTS(DT_NODELABEL(ctimer0)) && \
-      DT_NODE_HAS_COMPAT(DT_NODELABEL(ctimer0), nxp_ctimer_pwm)
-#  define SOUND_PWM_NODE DT_NODELABEL(ctimer0)
-#  define SOUND_PWM_CHAN 0U   /* frdm_mcxa153: CT0_MAT0 → D13 (P2_12) */
-#elif DT_NODE_EXISTS(DT_NODELABEL(flexpwm0_pwm0))
-#  define SOUND_PWM_NODE DT_NODELABEL(flexpwm0_pwm0)
-#  define SOUND_PWM_CHAN 0U   /* fallback: sub-module 0, channel A → P3_6 */
-#endif
-
-#ifdef SOUND_PWM_NODE
-static const struct device *_pwm_dev;
-static bool _pwm_ready;
+// Sound PWM spec from overlay:
+//   zephyr,user { pwms = <...>; pwm-names = "sound", ...; }
+// Accessed by name so board mapping stays entirely in the overlay.
+#if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), pwms)
+static const struct pwm_dt_spec _snd =
+    PWM_DT_SPEC_GET_BY_NAME(DT_PATH(zephyr_user), sound);
+#define _SOUND_PWM_ENABLED 1
+#else
+#define _SOUND_PWM_ENABLED 0
 #endif
 
 static bool _sound_on;
@@ -49,17 +41,16 @@ S_INLINE void set_tone(int freq)
     }
     _prev_out_freq = out_freq;
 
-#ifdef SOUND_PWM_NODE
-    if (!_pwm_ready) {
+#if _SOUND_PWM_ENABLED
+    if (!device_is_ready(_snd.dev)) {
         return;
     }
     if (out_freq == 0) {
         // 0% duty cycle at 100 Hz = constant LOW = silence
-        pwm_set(_pwm_dev, SOUND_PWM_CHAN, 10000000U, 0U, PWM_POLARITY_NORMAL);
+        pwm_set(_snd.dev, _snd.channel, 10000000U, 0U, _snd.flags);
     } else {
         uint32_t period_ns = 1000000000U / (uint32_t)out_freq;
-        pwm_set(_pwm_dev, SOUND_PWM_CHAN, period_ns, period_ns / 2U,
-                PWM_POLARITY_NORMAL);
+        pwm_set(_snd.dev, _snd.channel, period_ns, period_ns / 2U, _snd.flags);
     }
 #endif
 }
@@ -76,6 +67,8 @@ static void _sound_timer_fn(void *a, void *b, void *c)
     while (1) {
         k_sleep(K_USEC(16666));
         psg_tick();
+        frames++;        // TICK(0) / video_waitSync frame counter
+        _g.linecnt++;    // WAIT -n frame counter
         uint16_t tone = _g.psgtone;
         // Frequency formula from IchigoJam_P: freq = 60 * 261 / 2 / tone
         int freq = tone ? (7830 / (int)tone) : 0;
@@ -85,10 +78,6 @@ static void _sound_timer_fn(void *a, void *b, void *c)
 
 INLINE void sound_init(void) {
     _g.psgratio = 1;
-#ifdef SOUND_PWM_NODE
-    _pwm_dev   = DEVICE_DT_GET(SOUND_PWM_NODE);
-    _pwm_ready = device_is_ready(_pwm_dev);
-#endif
     _sound_on = false;
 
     k_thread_create(&_sound_timer_thread,

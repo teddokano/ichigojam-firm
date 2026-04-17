@@ -2,7 +2,9 @@
 //
 // GPIO pin assignments are defined per-board in the DT overlay
 // via the zephyr,user node (ij-led-gpios, ij-out1-gpios, ...).
-// This file is board-agnostic.
+// ADC, I2C, and PWM peripherals are selected via the DT chosen node
+// (ij-adc, ij-i2c) or zephyr,user pwms properties (ij-sound-pwms,
+// ij-pwm1-pwms..ij-pwm6-pwms) — no board-specific labels in this file.
 
 #ifndef __ICHIGOJAM_IO_H__
 #define __ICHIGOJAM_IO_H__
@@ -58,19 +60,18 @@ static const struct gpio_dt_spec _btn_spec =
 #define ANA_THRESHOLD (1024 / 4)
 #define PLEN_MAX 2000
 
-// --- ADC (RP2040: "adc", MCXA153: "lpadc0") ---
-#if DT_NODE_EXISTS(DT_NODELABEL(adc))
-#  define ADC_DEV     DEVICE_DT_GET(DT_NODELABEL(adc))
-#  define ADC_ENABLED 1
-#elif DT_NODE_EXISTS(DT_NODELABEL(lpadc0))
-#  define ADC_DEV     DEVICE_DT_GET(DT_NODELABEL(lpadc0))
+// --- ADC ---
+// Device selected via: chosen { ij-adc = <&adc>; } (or &lpadc0, etc.)
+// No board-specific label referenced here.
+#if DT_HAS_CHOSEN(ij_adc)
+#  define ADC_DEV     DEVICE_DT_GET(DT_CHOSEN(ij_adc))
 #  define ADC_ENABLED 1
 #else
 #  define ADC_ENABLED 0
 #endif
 
-// ADC read: channel 0-2, returns 10-bit value (0-1023).
-// RP2040: 12-bit ADC, shift >>2. gpio26=ch0, gpio27=ch1, gpio28=ch2.
+// ADC read: channel 0-based slot index, returns 10-bit value (0-1023).
+// 12-bit ADC result is shifted >>2 to produce 10-bit output.
 static int _adc_read(int channel)
 {
 #if ADC_ENABLED
@@ -88,6 +89,7 @@ static int _adc_read(int channel)
     if (buf < 0) buf = 0;
     return (int)buf >> 2; // 12-bit -> 10-bit
 #else
+    (void)channel;
     return 0;
 #endif
 }
@@ -111,11 +113,12 @@ void io_init(void)
     {
         const struct device *adc = ADC_DEV;
         if (device_is_ready(adc)) {
-#if DT_NODE_HAS_STATUS(DT_NODELABEL(lpadc0), okay)
-            /* MCXA153 LPADC: reference = VDDA = ADC_REF_EXTERNAL0.
-             * channel_id = slot index (0-3), input_positive = hardware ADC0_An number.
-             * ANA(1)=slot0→A8(P1_10/A0), ANA(2)=slot1→A10(P1_12/A1),
-             * ANA(3)=slot2→A11(P1_13/A2), ANA(4)=slot3→A0(P2_0/A3) */
+#if DT_HAS_COMPAT_STATUS_OKAY(nxp_lpc_lpadc)
+            /* NXP LPADC (MCXA153 etc.): external VDDA reference.
+             * channel_id  = slot index 0-3.
+             * input_positive = hardware ADC0_An number:
+             *   slot0→A8(P1_10/A0), slot1→A10(P1_12/A1),
+             *   slot2→A11(P1_13/A2), slot3→A0(P2_0/A3) */
             static const uint8_t mcxa_hw_ch[] = { 8, 10, 11, 0 };
             struct adc_channel_cfg cfg = {
                 .gain             = ADC_GAIN_1,
@@ -128,7 +131,8 @@ void io_init(void)
                 adc_channel_setup(adc, &cfg);
             }
 #else
-            /* RP2040: reference = internal. ch0=GPIO26(IN2), ch1=GPIO27(IN1) */
+            /* RP2040 and other boards: internal reference.
+             * ch0=GPIO26(IN2), ch1=GPIO27(IN1), ch2=GPIO28(BTN) */
             struct adc_channel_cfg cfg = {
                 .gain             = ADC_GAIN_1,
                 .reference        = ADC_REF_INTERNAL,
@@ -200,15 +204,15 @@ int IJB_btn(int n)
 
 S_INLINE int IJB_ana(int n)
 {
-#if DT_NODE_HAS_STATUS(DT_NODELABEL(lpadc0), okay)
-    /* MCXA153: ANA(n) → slot index 0-3 (set up in io_init with correct input_positive).
+#if DT_HAS_COMPAT_STATUS_OKAY(nxp_lpc_lpadc)
+    /* NXP LPADC: ANA(n) → slot index 0-3 (set up in io_init).
      * ANA(1)/ANA(9)=slot0→A8(A0), ANA(2)=slot1→A10(A1),
      * ANA(3)=slot2→A11(A2),       ANA(4)=slot3→A0(A3)  */
     int slot = (n == 9) ? 0 : (n - 1);
     if (slot < 0 || slot > 3) return 0;
     return _adc_read(slot);
 #else
-    /* RP2040: ANA(1)/ANA(9)=GPIO27=ch1, ANA(2)=GPIO26=ch0 */
+    /* RP2040 and other boards: ANA(1)/ANA(9)=GPIO27=ch1, ANA(2)=GPIO26=ch0 */
     int ch;
     if (n == 1 || n == 9) {
         ch = 1;
@@ -225,36 +229,49 @@ S_INLINE void IJB_clo(void) {
     io_init();
 }
 
-// --- PWM output on OUT1-5 ---
+// --- PWM output on OUT1-6 ---
 //
 // PWM port,plen{,len}
-//   port : 1-5  →  OUT1-OUT5
+//   port : 1-6  →  OUT1-OUT6
 //   plen : pulse width 0-2000 (0.01 ms units;  1000 = 1 ms)
 //   len  : period (default/0 → 2000 = 20 ms = 50 Hz, suits servo motors)
 //
-// Implementation note (RP2040):
-//   Zephyr has no public API to switch a GPIO pin's mux to PWM at runtime.
-//   We write directly to IO_BANK0 GPIO_CTRL[n].FUNCSEL (4=PWM, 5=SIO).
-//   pwm_off() / IJB_out() restore FUNCSEL to SIO before reconfiguring GPIO.
-//   RP2040 PWM channel number = gpio_pin % 16 (slices repeat every 16 pins).
+// Per-board PWM pin/device mapping lives entirely in the DT overlay:
+//   zephyr,user { ij-pwm1-pwms = <&dev ch period flags>; ... }
 //
-//     OUT1=GPIO8  → ch 8    OUT2=GPIO9  → ch 9
-//     OUT3=GPIO10 → ch 10   OUT4=GPIO11 → ch 11
-//     OUT5=GPIO22 → ch 6   (22 % 16 = 6)
+// RP2040 note: Zephyr has no public API to switch a GPIO pin's mux to PWM
+// at runtime. We write directly to IO_BANK0 GPIO_CTRL[n].FUNCSEL (4=PWM).
+// pwm_off() restores FUNCSEL=SIO before reconfiguring GPIO.
+// This is scoped to CONFIG_SOC_SERIES_RP2040 and documented below.
 
-#if DT_NODE_EXISTS(DT_NODELABEL(pwm)) && defined(CONFIG_SOC_SERIES_RP2040)
+// PWM OUT specs from overlay:
+//   zephyr,user { pwms = <...>; pwm-names = "sound","out1",...,"out6"; }
+// Accessed by name so board mapping stays entirely in the overlay.
+#if DT_NODE_HAS_PROP(DT_PATH(zephyr_user), pwms)
 
+static const struct pwm_dt_spec _pwm_out[] = {
+    PWM_DT_SPEC_GET_BY_NAME(_IJ, out1),  /* OUT1 */
+    PWM_DT_SPEC_GET_BY_NAME(_IJ, out2),  /* OUT2 */
+    PWM_DT_SPEC_GET_BY_NAME(_IJ, out3),  /* OUT3 */
+    PWM_DT_SPEC_GET_BY_NAME(_IJ, out4),  /* OUT4 */
+    PWM_DT_SPEC_GET_BY_NAME(_IJ, out5),  /* OUT5 */
+    PWM_DT_SPEC_GET_BY_NAME(_IJ, out6),  /* OUT6 */
+};
+
+#if defined(CONFIG_SOC_SERIES_RP2040)
+/* RP2040: Zephyr has no runtime pinmux API; set IO_BANK0 GPIO_CTRL.FUNCSEL
+ * directly to switch between SIO (GPIO) and PWM functions. */
 #define _RP2040_IO_BANK0 0x40014000UL
 #define _IJ_FUNC_PWM     4U
 #define _IJ_FUNC_SIO     5U
 
 static void _ij_gpio_func(uint32_t pin, uint32_t func)
 {
-    /* IO_BANK0: GPIO_STATUS at base+pin*8, GPIO_CTRL at base+pin*8+4 */
     volatile uint32_t *ctrl =
         (volatile uint32_t *)(_RP2040_IO_BANK0 + pin * 8U + 4U);
     *ctrl = (*ctrl & ~0x1FU) | (func & 0x1FU);
 }
+#endif /* CONFIG_SOC_SERIES_RP2040 */
 
 void IJB_pwm(int port, int plen, int len)
 {
@@ -263,91 +280,45 @@ void IJB_pwm(int port, int plen, int len)
     if (plen > PLEN_MAX) plen = PLEN_MAX;
     if (len  <= 0)       len  = PLEN_MAX;  /* 2000 × 0.01 ms = 20 ms */
 
-    /* Convert 0.01 ms units to nanoseconds */
     uint32_t period_ns = (uint32_t)len  * 10000U;
     uint32_t pulse_ns  = (uint32_t)plen * 10000U;
     if (pulse_ns > period_ns) pulse_ns = period_ns;
 
-    const struct device *pwm_dev = DEVICE_DT_GET(DT_NODELABEL(pwm));
-    if (!device_is_ready(pwm_dev)) return;
+    const struct pwm_dt_spec *s = &_pwm_out[port - 1];
+    if (!device_is_ready(s->dev)) return;
+    pwm_set(s->dev, s->channel, period_ns, pulse_ns, s->flags);
 
-    uint32_t pin = (uint32_t)_out_spec[port - 1].pin;
-    uint32_t ch  = pin % 16U;  /* RP2040 PWM slice mapping */
-
-    pwm_set(pwm_dev, ch, period_ns, pulse_ns, PWM_POLARITY_NORMAL);
-    _ij_gpio_func(pin, _IJ_FUNC_PWM);  /* switch pin mux to PWM function */
+#if defined(CONFIG_SOC_SERIES_RP2040)
+    /* Switch GPIO pin mux to PWM function so the signal appears on the pin. */
+    _ij_gpio_func((uint32_t)_out_spec[port - 1].pin, _IJ_FUNC_PWM);
+#endif
 }
 
 S_INLINE void pwm_off(int port)
 {
     if (port < 1 || port > 6) return;
-    /* Restore SIO function so gpio_pin_configure_dt() takes effect */
+    const struct pwm_dt_spec *s = &_pwm_out[port - 1];
+    if (!device_is_ready(s->dev)) return;
+    pwm_set(s->dev, s->channel, 10000000U, 0U, s->flags);
+
+#if defined(CONFIG_SOC_SERIES_RP2040)
+    /* Restore SIO function so gpio_pin_configure_dt() takes effect. */
     _ij_gpio_func((uint32_t)_out_spec[port - 1].pin, _IJ_FUNC_SIO);
     IJB_out(port, 0);
+#endif
 }
 
-#elif DT_NODE_HAS_STATUS(DT_NODELABEL(flexpwm0_pwm0), okay) && \
-      DT_NODE_HAS_STATUS(DT_NODELABEL(flexpwm0_pwm1), okay) && \
-      DT_NODE_HAS_STATUS(DT_NODELABEL(flexpwm0_pwm2), okay)
+#else /* no pwms in overlay → stub */
 
-// frdm_mcxa153: dedicated FlexPWM pins, separate from OUT GPIO.
-// No runtime pinmux switching needed.
-//
-//   port 1,2 → flexpwm0_pwm0 (sm0) ch 0,1 → P3_6,  P3_7
-//   port 3,4 → flexpwm0_pwm1 (sm1) ch 0,1 → P3_8,  P3_9
-//   port 5,6 → flexpwm0_pwm2 (sm2) ch 0,1 → P3_10, P3_11
-//
-// sm1 and sm2 have independent period registers → no interference with
-// sound (ctimer0) or with each other.
-
-static const struct device * const _ij_flexpwm[] = {
-    DEVICE_DT_GET(DT_NODELABEL(flexpwm0_pwm0)),  /* port 1,2 */
-    DEVICE_DT_GET(DT_NODELABEL(flexpwm0_pwm1)),  /* port 3,4 */
-    DEVICE_DT_GET(DT_NODELABEL(flexpwm0_pwm2)),  /* port 5,6 */
-};
-
-void IJB_pwm(int port, int plen, int len)
-{
-    if (port < 1 || port > 6) return;
-    if (plen < 0)        plen = 0;
-    if (plen > PLEN_MAX) plen = PLEN_MAX;
-    if (len  <= 0)       len  = PLEN_MAX;  /* 2000 × 0.01 ms = 20 ms */
-
-    uint32_t period_ns = (uint32_t)len  * 10000U;
-    uint32_t pulse_ns  = (uint32_t)plen * 10000U;
-    if (pulse_ns > period_ns) pulse_ns = period_ns;
-
-    int dev_idx = (port - 1) / 2;  /* 0=sm0, 1=sm1, 2=sm2 */
-    uint32_t ch = (uint32_t)(port - 1) % 2U;  /* 0=chA, 1=chB */
-
-    const struct device *dev = _ij_flexpwm[dev_idx];
-    if (!device_is_ready(dev)) return;
-    pwm_set(dev, ch, period_ns, pulse_ns, PWM_POLARITY_NORMAL);
-}
-
-S_INLINE void pwm_off(int port)
-{
-    if (port < 1 || port > 6) return;
-    int dev_idx = (port - 1) / 2;
-    uint32_t ch = (uint32_t)(port - 1) % 2U;
-    const struct device *dev = _ij_flexpwm[dev_idx];
-    if (!device_is_ready(dev)) return;
-    pwm_set(dev, ch, 10000000U, 0U, PWM_POLARITY_NORMAL);
-}
-
-#else
-
-/* No supported PWM hardware: stub */
 void IJB_pwm(int port, int plen, int len) { (void)port; (void)plen; (void)len; }
 S_INLINE void pwm_off(int port) { (void)port; }
 
-#endif /* PWM implementations */
+#endif /* PWM OUT */
 
 // --- I2C ---
 //
-// Device selection (compile-time, based on DT status):
-//   RP2040:   i2c0   (GPIO4=SDA, GPIO5=SCL, enabled in overlay)
-//   MCXA153:  lpi2c0 (arduino_i2c alias, enabled in overlay)
+// Device selected via: chosen { ij-i2c = <&i2c0>; } (or &lpi2c0, etc.)
+// No board-specific label referenced here.
 //
 // IJB_i2c(writemode, param):
 //   param[0] = 7-bit I2C address
@@ -359,11 +330,8 @@ S_INLINE void pwm_off(int port) { (void)port; }
 //   writemode==1: write buf1, read  buf2  (register read)
 //   Returns 0 on success, 1 on error.
 
-#if DT_NODE_HAS_STATUS(DT_NODELABEL(i2c0), okay)
-#  define _IJ_I2C_DEV DEVICE_DT_GET(DT_NODELABEL(i2c0))
-#  define _IJ_I2C_ENABLED 1
-#elif DT_NODE_HAS_STATUS(DT_NODELABEL(lpi2c0), okay)
-#  define _IJ_I2C_DEV DEVICE_DT_GET(DT_NODELABEL(lpi2c0))
+#if DT_HAS_CHOSEN(ij_i2c)
+#  define _IJ_I2C_DEV DEVICE_DT_GET(DT_CHOSEN(ij_i2c))
 #  define _IJ_I2C_ENABLED 1
 #else
 #  define _IJ_I2C_ENABLED 0
@@ -403,6 +371,7 @@ S_INLINE int IJB_i2c(uint8 writemode, uint16 *param) {
     }
     return r == 0 ? 0 : 1;
 #else
+    (void)writemode; (void)param;
     return 1;
 #endif
 }
