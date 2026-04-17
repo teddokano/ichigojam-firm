@@ -61,7 +61,7 @@ static const struct gpio_dt_spec _btn_spec =
 #define PLEN_MAX 2000
 
 // --- ADC ---
-// Device selected via: chosen { ij-adc = <&adc>; } (or &lpadc0, etc.)
+// Device selected via: chosen { ij-adc = &adc; } (or &lpadc0, etc.) -- no < >
 // No board-specific label referenced here.
 #if DT_HAS_CHOSEN(ij_adc)
 #  define ADC_DEV     DEVICE_DT_GET(DT_CHOSEN(ij_adc))
