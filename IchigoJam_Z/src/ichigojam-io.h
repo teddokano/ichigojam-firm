@@ -96,13 +96,14 @@ static int _adc_read(int channel)
 
 void io_init(void)
 {
-#if !DT_HAS_COMPAT_STATUS_OKAY(nxp_lpc_lpadc)
+#if !DT_HAS_COMPAT_STATUS_OKAY(nxp_lpc_lpadc) && \
+    !DT_HAS_COMPAT_STATUS_OKAY(nxp_kinetis_adc16)
     /* IN1-IN4: digital input with pull-up.
-     * Skipped on LPADC boards (MCXA153 etc.): these pins are shared with
-     * ADC analog inputs.  The DTS pinctrl (pinmux_lpadc0) puts them in
-     * analog mode at device-probe time; calling gpio_pin_configure_dt here
-     * would override that to GPIO digital mode and silently disable the
-     * ADC input buffer, causing ANA() to always return 0. */
+     * Skipped on LPADC (MCXA153) and Kinetis ADC16 (MCXC444) boards: these
+     * pins are shared with ADC analog inputs.  The DTS pinctrl sets them to
+     * analog mode (ALT0) at device-probe time; calling gpio_pin_configure_dt
+     * here would override that to GPIO digital mode and disconnect the ADC
+     * input path, causing ANA() to always return 0. */
     for (int i = 0; i < 4; i++) {
         gpio_pin_configure_dt(&_out_spec[7 + i], GPIO_INPUT | GPIO_PULL_UP);
     }
@@ -135,6 +136,20 @@ void io_init(void)
             for (int i = 0; i < 4; i++) {
                 cfg.channel_id     = i;
                 cfg.input_positive = mcxa_hw_ch[i];
+                adc_channel_setup(adc, &cfg);
+            }
+#elif DT_HAS_COMPAT_STATUS_OKAY(nxp_kinetis_adc16)
+            /* Kinetis ADC16 (MCXC444 etc.): channel_id IS the SE mux number.
+             * ADC_REF_INTERNAL = VREFH (external pin, 3.3V on FRDM boards).
+             * Slot 0-3 → SE0(A0), SE4a(A1), SE3(A2), SE7a(A3) */
+            static const uint8_t mcxc_hw_ch[] = { 0, 4, 3, 7 };
+            struct adc_channel_cfg cfg = {
+                .gain             = ADC_GAIN_1,
+                .reference        = ADC_REF_INTERNAL,
+                .acquisition_time = ADC_ACQ_TIME_DEFAULT,
+            };
+            for (int i = 0; i < 4; i++) {
+                cfg.channel_id = mcxc_hw_ch[i];
                 adc_channel_setup(adc, &cfg);
             }
 #else
@@ -212,12 +227,19 @@ int IJB_btn(int n)
 S_INLINE int IJB_ana(int n)
 {
 #if DT_HAS_COMPAT_STATUS_OKAY(nxp_lpc_lpadc)
-    /* NXP LPADC: ANA(n) → slot index 0-3 (set up in io_init).
+    /* NXP LPADC (MCXA153): ANA(n) → slot index 0-3 (set up in io_init).
      * ANA(1)/ANA(9)=slot0→A8(A0), ANA(2)=slot1→A10(A1),
      * ANA(3)=slot2→A11(A2),       ANA(4)=slot3→A0(A3)  */
     int slot = (n == 9) ? 0 : (n - 1);
     if (slot < 0 || slot > 3) return 0;
     return _adc_read(slot);
+#elif DT_HAS_COMPAT_STATUS_OKAY(nxp_kinetis_adc16)
+    /* Kinetis ADC16 (MCXC444): channel_id = SE mux number directly.
+     * ANA(1)/ANA(9)=SE0(A0), ANA(2)=SE4a(A1), ANA(3)=SE3(A2), ANA(4)=SE7a(A3) */
+    static const uint8_t mcxc_hw_ch[] = { 0, 4, 3, 7 };
+    int idx = (n == 9) ? 1 : n;
+    if (idx < 1 || idx > 4) return 0;
+    return _adc_read(mcxc_hw_ch[idx - 1]);
 #else
     /* RP2040 and other boards: ANA(1)/ANA(9)=GPIO27=ch1, ANA(2)=GPIO26=ch0 */
     int ch;
@@ -250,6 +272,26 @@ S_INLINE void IJB_clo(void) {
 // at runtime. We write directly to IO_BANK0 GPIO_CTRL[n].FUNCSEL (4=PWM).
 // pwm_off() restores FUNCSEL=SIO before reconfiguring GPIO.
 // This is scoped to CONFIG_SOC_SERIES_RP2040 and documented below.
+
+// --- Kinetis PCR runtime pinmux (for boards like MCXC444) ---
+//
+// Kinetis MCX-C has no Zephyr runtime pinmux API (same limitation as RP2040).
+// The overlay can define ij-out-tpm-pcr with [port_base, pin, tpm_mux] tuples
+// (one per OUT port) to enable GPIO ↔ TPM switching via direct PORT_PCR writes.
+// MUX field = bits [10:8] of PCR; GPIO = MUX 1, TPM = MUX as specified.
+#if DT_NODE_HAS_PROP(_IJ, ij_out_tpm_pcr)
+static const uint32_t _ij_tpm_pcr[] = DT_PROP(_IJ, ij_out_tpm_pcr);
+#define _IJ_PCR_CELLS 3
+
+static void _ij_pcr_set_mux(int out_idx, uint32_t mux)
+{
+    const uint32_t *e = _ij_tpm_pcr + (uint32_t)out_idx * _IJ_PCR_CELLS;
+    volatile uint32_t *pcr = (volatile uint32_t *)(e[0] + e[1] * 4U);
+    *pcr = (*pcr & ~(0x7U << 8)) | (mux << 8);
+}
+#define _IJ_PIN_TO_TPM(i)  _ij_pcr_set_mux((i), _ij_tpm_pcr[(i)*_IJ_PCR_CELLS+2])
+#define _IJ_PIN_TO_GPIO(i) _ij_pcr_set_mux((i), 1U)
+#endif /* ij_out_tpm_pcr */
 
 // PWM OUT specs from overlay:
 //   zephyr,user { pwms = <...>; pwm-names = "sound","out1",...,"out6"; }
@@ -299,6 +341,10 @@ void IJB_pwm(int port, int plen, int len)
     /* Switch GPIO pin mux to PWM function so the signal appears on the pin. */
     _ij_gpio_func((uint32_t)_out_spec[port - 1].pin, _IJ_FUNC_PWM);
 #endif
+#if DT_NODE_HAS_PROP(_IJ, ij_out_tpm_pcr)
+    /* Restore pin to TPM function (may have been switched to GPIO by IJB_out). */
+    _IJ_PIN_TO_TPM(port - 1);
+#endif
 }
 
 S_INLINE void pwm_off(int port)
@@ -311,6 +357,11 @@ S_INLINE void pwm_off(int port)
 #if defined(CONFIG_SOC_SERIES_RP2040)
     /* Restore SIO function so gpio_pin_configure_dt() takes effect. */
     _ij_gpio_func((uint32_t)_out_spec[port - 1].pin, _IJ_FUNC_SIO);
+    IJB_out(port, 0);
+#endif
+#if DT_NODE_HAS_PROP(_IJ, ij_out_tpm_pcr)
+    /* Switch pin back to GPIO mode, then set output low. */
+    _IJ_PIN_TO_GPIO(port - 1);
     IJB_out(port, 0);
 #endif
 }

@@ -1,0 +1,163 @@
+/*
+ * IchigoJam_Z - FRDM-MCXC444 device tree overlay
+ *
+ * Base BSP already provides:
+ *   lpuart0: console at 115200 baud (PTA1/PTA2)
+ *   adc0:    enabled, pinmux_adc0 has PTE20(SE0) and PTE22(SE3)
+ *   i2c0:    enabled at PTE24(SCL)/PTE25(SDA), FXLS8974 accel at 0x18
+ *   tpm0:    enabled, CH2=PTE29(blue LED), CH4=PTE31(red LED), CH5=PTD5(green LED)
+ *   gpioa-e: all enabled
+ *   flash0:  storage_partition at 0x38000 (32KB) — already correct, no change needed
+ *
+ * This overlay adds:
+ *   tpm0: CH0=PTD0(OUT1), CH1=PTD1(OUT2), CH3=PTD3(OUT3)
+ *   tpm1: CH0=PTB0(OUT4), CH1=PTB1(OUT5)
+ *   tpm2: CH0=PTB18(OUT6), CH1=PTB19(SOUND)
+ *   adc0: adds PTE21(SE4a/A1) and PTE23(SE7a/A3)
+ *
+ * Pin assignments:
+ *   LED    PTE31 (GPIOE 31, active LOW)   — onboard Red LED
+ *   BTN    PTC3  (GPIOC  3, active LOW)   — SW2
+ *   OUT1   PTD0  / TPM0_CH0
+ *   OUT2   PTD1  / TPM0_CH1
+ *   OUT3   PTD3  / TPM0_CH3  [UART2_TX pin, uart2 disabled in BSP]
+ *   OUT4   PTB0  / TPM1_CH0
+ *   OUT5   PTB1  / TPM1_CH1
+ *   OUT6   PTB18 / TPM2_CH0
+ *   SOUND  PTB19 / TPM2_CH1
+ *   IN1/ANA(1)  PTE20 — ADC0_SE0  (Arduino A0)
+ *   IN2/ANA(2)  PTE21 — ADC0_SE4a (Arduino A1)
+ *   IN3/ANA(3)  PTE22 — ADC0_SE3  (Arduino A2)
+ *   IN4/ANA(4)  PTE23 — ADC0_SE7a (Arduino A3)
+ *
+ * Note: Kinetis TPM has a shared period register per module.
+ *   SOUND (TPM2_CH1) and OUT6 (TPM2_CH0) share TPM2 period.
+ *   Do not use BEEP/PLAY and PWM 6 simultaneously.
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/* Add OUT1-3 channels to existing tpm0 pinctrl.
+ * BSP group0 has CH2=PTE29, CH4=PTE31, CH5=PTD5.
+ * New group adds CH0=PTD0, CH1=PTD1, CH3=PTD3 (all ALT4). */
+&pinctrl {
+	pinmux_tpm0: pinmux_tpm0 {
+		group_out {
+			pinmux = <TPM0_CH0_PTD0>,
+				 <TPM0_CH1_PTD1>,
+				 <TPM0_CH3_PTD3>;
+			drive-strength = "low";
+			slew-rate = "slow";
+		};
+	};
+
+	pinmux_tpm1_out: pinmux_tpm1_out {
+		group0 {
+			pinmux = <TPM1_CH0_PTB0>,
+				 <TPM1_CH1_PTB1>;
+			drive-strength = "low";
+			slew-rate = "slow";
+		};
+	};
+
+	pinmux_tpm2_out: pinmux_tpm2_out {
+		group0 {
+			pinmux = <TPM2_CH0_PTB18>,
+				 <TPM2_CH1_PTB19>;
+			drive-strength = "low";
+			slew-rate = "slow";
+		};
+	};
+
+	/* Add A1(PTE21=SE4a) and A3(PTE23=SE7a) to existing adc0 pinctrl.
+	 * BSP group0 already has PTE20(SE0) and PTE22(SE3). */
+	pinmux_adc0: pinmux_adc0 {
+		group1 {
+			pinmux = <ADC0_SE4a_PTE21>,
+				 <ADC0_SE7a_PTE23>;
+			drive-strength = "low";
+			slew-rate = "slow";
+		};
+	};
+};
+
+/* Enable TPM1 and TPM2 for OUT4-5 and OUT6/SOUND */
+&tpm1 {
+	status = "okay";
+	pinctrl-0 = <&pinmux_tpm1_out>;
+	pinctrl-names = "default";
+	clocks = <&sim KINETIS_SIM_CLOCK(KINETIS_SIM_MCGPCLK, 0x103c, 25)>;
+};
+
+&tpm2 {
+	status = "okay";
+	pinctrl-0 = <&pinmux_tpm2_out>;
+	pinctrl-names = "default";
+	clocks = <&sim KINETIS_SIM_CLOCK(KINETIS_SIM_MCGPCLK, 0x103c, 26)>;
+};
+
+/* I2C0: already enabled by BSP; update to 400 kHz */
+&i2c0 {
+	clock-frequency = <I2C_BITRATE_FAST>;
+};
+
+/ {
+	chosen {
+		ij-adc = &adc0;   /* ADC device for ANA()/IN() */
+		ij-i2c = &i2c0;  /* I2C device for I2C() command */
+	};
+
+	zephyr,user {
+		/* IchigoJam GPIO pin assignments for FRDM-MCXC444 */
+		ij-led-gpios  = <&gpioe 31 GPIO_ACTIVE_LOW>;   /* Red LED (D5) */
+		ij-btn-gpios  = <&gpioc  3 GPIO_ACTIVE_LOW>;   /* SW2 */
+		ij-out1-gpios = <&gpiod  0 GPIO_ACTIVE_HIGH>;  /* PTD0 */
+		ij-out2-gpios = <&gpiod  1 GPIO_ACTIVE_HIGH>;  /* PTD1 */
+		ij-out3-gpios = <&gpiod  3 GPIO_ACTIVE_HIGH>;  /* PTD3 */
+		ij-out4-gpios = <&gpiob  0 GPIO_ACTIVE_HIGH>;  /* PTB0 */
+		ij-out5-gpios = <&gpiob  1 GPIO_ACTIVE_HIGH>;  /* PTB1 */
+		ij-out6-gpios = <&gpiob 18 GPIO_ACTIVE_HIGH>;  /* PTB18 */
+		ij-in1-gpios  = <&gpioe 20 GPIO_ACTIVE_HIGH>;  /* PTE20 = ADC0_SE0  / A0 */
+		ij-in2-gpios  = <&gpioe 21 GPIO_ACTIVE_HIGH>;  /* PTE21 = ADC0_SE4a / A1 */
+		ij-in3-gpios  = <&gpioe 22 GPIO_ACTIVE_HIGH>;  /* PTE22 = ADC0_SE3  / A2 */
+		ij-in4-gpios  = <&gpioe 23 GPIO_ACTIVE_HIGH>;  /* PTE23 = ADC0_SE7a / A3 */
+
+		/*
+		 * PWM specs for IchigoJam sound and OUT PWM outputs.
+		 *
+		 * Kinetis TPM: each module has ONE shared period register.
+		 *   TPM0: OUT1(CH0), OUT2(CH1), OUT3(CH3)  — shared period
+		 *   TPM1: OUT4(CH0), OUT5(CH1)             — shared period
+		 *   TPM2: OUT6(CH0), SOUND(CH1)            — shared period
+		 * Caution: BEEP/PLAY changes TPM2 period; avoid PWM 6 simultaneously.
+		 *
+		 * Period dummy values; actual period set by pwm_set() at runtime.
+		 */
+		pwms = <&tpm2 1 1000     PWM_POLARITY_NORMAL>,  /* sound: TPM2_CH1 */
+		       <&tpm0 0 20000000 PWM_POLARITY_NORMAL>,  /* out1:  TPM0_CH0 */
+		       <&tpm0 1 20000000 PWM_POLARITY_NORMAL>,  /* out2:  TPM0_CH1 */
+		       <&tpm0 3 20000000 PWM_POLARITY_NORMAL>,  /* out3:  TPM0_CH3 */
+		       <&tpm1 0 20000000 PWM_POLARITY_NORMAL>,  /* out4:  TPM1_CH0 */
+		       <&tpm1 1 20000000 PWM_POLARITY_NORMAL>,  /* out5:  TPM1_CH1 */
+		       <&tpm2 0 20000000 PWM_POLARITY_NORMAL>;  /* out6:  TPM2_CH0 */
+		pwm-names = "sound", "out1", "out2", "out3", "out4", "out5", "out6";
+
+		/*
+		 * Kinetis MCX-C lacks a Zephyr runtime pinmux API (same limitation
+		 * as RP2040).  Each OUT1-6 entry encodes [PORT_base, pin, tpm_mux]
+		 * for ichigojam-io.h to restore TPM function via direct PCR writes
+		 * after a GPIO operation switches the pin back to ALT1.
+		 *   PORT base addresses: A=0x40049000 B=0x4004A000 C=0x4004B000
+		 *                        D=0x4004C000 E=0x4004D000
+		 *   TPM mux values come from MCXC444VLH-pinctrl.h KINETIS_MUX last arg.
+		 */
+		ij-out-tpm-pcr =
+			<0x4004C000  0 4>,  /* OUT1: PORTD, pin  0, ALT4=TPM0_CH0 */
+			<0x4004C000  1 4>,  /* OUT2: PORTD, pin  1, ALT4=TPM0_CH1 */
+			<0x4004C000  3 4>,  /* OUT3: PORTD, pin  3, ALT4=TPM0_CH3 */
+			<0x4004A000  0 3>,  /* OUT4: PORTB, pin  0, ALT3=TPM1_CH0 */
+			<0x4004A000  1 3>,  /* OUT5: PORTB, pin  1, ALT3=TPM1_CH1 */
+			<0x4004A000 18 3>;  /* OUT6: PORTB, pin 18, ALT3=TPM2_CH0 */
+	};
+};
