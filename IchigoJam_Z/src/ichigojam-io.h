@@ -96,10 +96,17 @@ static int _adc_read(int channel)
 
 void io_init(void)
 {
-    // IN1-IN4: input with pull-up
+#if !DT_HAS_COMPAT_STATUS_OKAY(nxp_lpc_lpadc)
+    /* IN1-IN4: digital input with pull-up.
+     * Skipped on LPADC boards (MCXA153 etc.): these pins are shared with
+     * ADC analog inputs.  The DTS pinctrl (pinmux_lpadc0) puts them in
+     * analog mode at device-probe time; calling gpio_pin_configure_dt here
+     * would override that to GPIO digital mode and silently disable the
+     * ADC input buffer, causing ANA() to always return 0. */
     for (int i = 0; i < 4; i++) {
         gpio_pin_configure_dt(&_out_spec[7 + i], GPIO_INPUT | GPIO_PULL_UP);
     }
+#endif
     // BTN: input with pull-up
     gpio_pin_configure_dt(&_btn_spec, GPIO_INPUT | GPIO_PULL_UP);
     // OUT1-OUT6: output inactive
