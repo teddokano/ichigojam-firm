@@ -104,8 +104,8 @@
 
 / {
 	chosen {
-		ij-adc = <&lpadc0>;  /* ADC device for ANA()/IN() */
-		ij-i2c = <&lpi2c0>; /* I2C device for I2C() command */
+		ij-adc = &lpadc0;  /* ADC device for ANA()/IN() */
+		ij-i2c = &lpi2c0; /* I2C device for I2C() command */
 	};
 
 	zephyr,user {
