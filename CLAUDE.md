@@ -16,8 +16,8 @@ IchigoJam BASIC を Zephyr RTOS 上で動かすプロジェクト。
 
 ## 現在の状態
 
-**M0〜M4 完了。Pico（rpi_pico）と FRDM-MCXA153 の両ボードで動作確認済み。**
-**作業ブランチ: `zephyr-m4`（M5はここから開始する）**
+**M0〜M5a 完了。Pico（rpi_pico）と FRDM-MCXA153 の両ボードで動作確認済み。**
+**作業ブランチ: `zephyr-m5`（M5b はここから開始する）**
 
 | | 内容 | 状態 |
 |---|---|---|
@@ -26,7 +26,8 @@ IchigoJam BASIC を Zephyr RTOS 上で動かすプロジェクト。
 | M2 | GPIO + NVS + @ARUN自動起動 | 完了 |
 | M3 | PWM/PSG + WAIT | 完了 |
 | M4 | I2C + USR() | 完了 |
-| M5 | FRDM-MCXC444 ポート | 未着手 |
+| M5a | HALリファクタリング（overlay統一） | 完了 |
+| M5b | FRDM-MCXC444 ポート | 未着手 |
 | M6 | CVBSビデオ出力（Pico先行） | 未着手 |
 | M7 | FRDM-MCXC444 + CVBS | 未着手 |
 
@@ -174,51 +175,7 @@ IN1〜IN4=A0〜A3, SOUND=D13(P2_12, CTimer0), BTN=SW2(P3_29)。
 
 ## 既知の未実装・要修正箇所
 
-### 1. `frames` と `_g.linecnt` のインクリメント漏れ
-`sound.h` の `_sound_timer_fn` に追加が必要：
-```c
-psg_tick();
-frames++;        // ← 追加
-_g.linecnt++;    // ← 追加
-```
-これがないと `TICK(0)` が常に0、`WAIT -n`（フレーム待ち）が機能しない。
-
-### 2. `IJB_wait()` の負値処理が未実装
-```c
-int IJB_wait(int n, int active) {
-    if (n < 0) {
-        _g.linecnt = 0;
-        n = -n;
-        while (_g.linecnt < (uint16_t)n) {
-            k_sleep(K_MSEC(1));
-            if (stopExecute()) return 1;
-        }
-        return 0;
-    }
-    int ticks = n;
-    while (ticks > 0) {
-        k_sleep(K_MSEC(16));
-        ticks--;
-        if (stopExecute()) return 1;
-    }
-    return 0;
-}
-```
-
-### 3. `system_init()` の実装
-```c
-void system_init(void) {
-    _g.screen_big = 0;
-    _g.screen_invert = 0;
-    _g.lastfile = 0;
-    _g.screen_insertmode = 1;
-    key_flg.insert = 0;
-    // noresmode は key_flg.keyflg_noresmode のマクロ。
-    // key_flg はゼロ初期化されるので明示的な初期化不要。
-}
-```
-
-### 4. RP2040 の PWM pinmux（レジスタ直叩き・残留確定）
+### 1. RP2040 の PWM pinmux（レジスタ直叩き・残留確定）
 `ichigojam-io.h` で `IO_BANK0 GPIO_CTRL[n].FUNCSEL` を直接書いている。
 ZephyrのPinctrl APIはDTSで**静的**にpin-functionを定義するものであり、
 runtime動的切り替えのAPIは現状Zephyrに存在しない。
@@ -227,65 +184,28 @@ runtime動的切り替えのAPIは現状Zephyrに存在しない。
 - `#if defined(CONFIG_SOC_SERIES_RP2040)` で確実にスコープを閉じる
 - 「ZephyrにAPIがないため直叩きを使う」旨をコメントで明記する
 
-### 5. `IJB_reset()` が CMSIS の `NVIC_SystemReset()` を使っている
-Zephyrの正式APIに置き換える：
-```c
-#include <zephyr/sys/reboot.h>
-S_INLINE void IJB_reset(void) {
-    sys_reboot(SYS_REBOOT_COLD);
-}
-```
+### 2. `@ARUN` 自動起動の確認
+M5b開始前に `@ARUN` プログラムを保存してリセット後に動作確認すること。
 
-### 6. MCXA153の `storage_partition` がNVSに対して小さすぎる可能性
-MCXA153のflash sector size = **8KB**（`FSL_FEATURE_SYSCON_FLASH_SECTOR_SIZE_BYTES`）。
-base DTSの storage_partition = **16KB** = **2 sectors** のみ。
-`N_FLASH_STORAGE=100` ファイル分のデータには全く足りない。
+### 3. MCXA153の IN1-IN4 デジタル読み取り
+`io_init()` で IN1-IN4 を `GPIO_INPUT|GPIO_PULL_UP` に設定しないため（ADCピンを
+アナログモードのまま保持するため）、`IN()` の bit0-3 は常に 0 を返す可能性がある。
+MCXA153 では IN1-IN4 は ADC 専用ピン（ANA(1)～ANA(4) のみ使用可）。
 
-対策（M5-a 開始時に要判断）：
-- `N_FLASH_STORAGE` を現実的な値（例: 8〜16）に減らす、または
-- `frdm_mcxa153.overlay` で storage_partition を拡大する
-
-```dts
-/* frdm_mcxa153.overlay で storage_partition を拡大する例（32KB = 4 sectors）*/
-&flash0 {
-    partitions {
-        storage_partition: partition@18000 {
-            label = "storage";
-            reg = <0x18000 DT_SIZE_K(32)>;
-        };
-    };
-};
-```
-
-### 7. `@ARUN` 自動起動の確認
-`main.c` の `#if VER_PLATFORM == PLATFORM_LPC1114` には入らないため、
-HAL側（`getSleepFlag()` またはその後）で対処している想定。
-M5開始前に `@ARUN` プログラムを保存してリセット後に動作確認すること。
-
-### 8. `displaymode` 変数（未使用・残留確定）
+### 4. `displaymode` 変数（未使用・残留確定）
 `keyboard.h` で `uint8 displaymode;` を定義しているが Zephyr版では参照なし。
-BASICコアから要求される定義のため削除不可。コメントを明記しておく：
-```c
-uint8 displaymode;  // required by IchigoJam_BASIC core; unused in Zephyr port
-```
+BASICコアから要求される定義のため削除不可。
 
-### 9. `video_waitSync(1)` はM6でも16ms yieldを維持すること
-`main.c` のメインループに `video_waitSync(1)` があり、コメントに
-「消すとUART受信漏れ発生?」とある。
-現状は `k_sleep(K_MSEC(16))` として実装されており、
-`K_PRIO_PREEMPT(7)` のメインスレッドが定期的にCPUを手放すことで
-UART IRQ処理の機会を確保している。
+### 5. `video_waitSync(1)` はM6でも16ms yieldを維持すること
+現状は `k_sleep(K_MSEC(16))` として実装。
 **M6でCVBSを実装して `video_waitSync()` の実装が変わる際も、
 最低16msのyieldを保証すること。**
 
-### 10. 小RAMボード移植時の注意（MCXC444など）
+### 6. 小RAMボード移植時の注意（MCXC444など）
 `basic.h` の `pchar` は `MEM_UNDER64KB` 未定義のため `char*`（4バイト）。
 `gosubstack[30] + forstack[6]` で144バイト消費。
 `ram[SIZE_RAM]`（約4.3KB）がBSSに確保される。
 RAMが8KB以下のボードへの移植時は `MEM_UNDER64KB` の定義を検討する。
-`main.c` の `#if VER_PLATFORM == PLATFORM_LPC1114` には入らないため、
-HAL側（`getSleepFlag()` またはその後）で対処している想定。
-M5開始前に `@ARUN` プログラムを保存してリセット後に動作確認すること。
 
 ---
 
@@ -369,131 +289,51 @@ platform_allow:
 
 ---
 
-## M5-a 開始時に最初にやること（順番通りに）
+## M5-a 完了サマリ（zephyr-m5 ブランチ）
 
-1. **`flashstorage.h` のincludeパスはそのまま**（修正不要・確認済み）
-   - Zephyr 4.4 では `zephyr/kvss/nvs.h` が正しいパス（M5-a で確認済み）
-   - `zephyr/fs/nvs.h` は deprecated で逆に警告が出る
-   - CLAUDE.md の記述が誤りだった（旧バージョンのZephyr向け情報）
+以下がすべて実装・動作確認済み：
 
-2. **MCXA153の `storage_partition` サイズ確認**
-   MCXA153の flash sector size = 8KB。base DTSの storage_partition = 16KB = 2 sectors。
-   `N_FLASH_STORAGE=100` には不足。overlay で拡大するか値を減らすか決める。
-   （詳細は「既知の未実装・要修正箇所 6」を参照）
+- `flashstorage.h`: `zephyr/kvss/nvs.h`（Zephyr 4.4 の正式パス）
+- `frdm_mcxa153.overlay`: storage_partition を 32KB（4セクタ）に拡大
+- `sound.h`: `frames++` / `_g.linecnt++` 追加、`pwm_dt_spec` で統一
+- `system.h`: `system_init()` 実装、`IJB_wait()` 負値処理、`sys_reboot()` 置換
+- `ichigojam-io.h`: ADC/I2C/PWM をすべて overlay 駆動に統一
+- LPADC IN1-IN4 GPIO設定スキップ（ADCピンをアナログモードに保持）
+- 動作確認: ANA()・I2C() 正常動作
 
-3. **`@ARUN` 動作確認**
-   `@ARUN` プログラムを保存してリセット後に自動起動するか確認。
-   未確認のまま進むと後で原因切り分けが困難になる。
+### ⚠️ `/chosen` プロパティの記法
 
-4. **`frames` と `_g.linecnt` のインクリメント追加**（`sound.h`）
-   ```c
-   // _sound_timer_fn 内、psg_tick() の後
-   frames++;
-   _g.linecnt++;
-   ```
+`DT_HAS_CHOSEN()` が機能するには **`&foo` 形式（`< >` なし）** で書く必要がある：
 
-5. **`IJB_wait()` の負値処理追加**（`system.h`）
-   「既知の未実装・要修正箇所」の実装を追加する。
-
-6. **`system_init()` の実装**（`system.h`）
-   「既知の未実装・要修正箇所」の実装を追加する。
-
-7. **`IJB_reset()` の置き換え**（`system.h`）
-   `NVIC_SystemReset()` → `sys_reboot(SYS_REBOOT_COLD)`
-
-8. **ADC・sound・I2C・IJB_pwm のリファクタリング**
-   「移植性のための設計原則」に従い、各ファイルを1つずつ変更する。
-   変更のたびにPicoとMCXA153でビルド確認する。
-
----
-
-## M5: FRDM-MCXC444 ポート
-
-### M5-a: リファクタリング（先行）
-
-`.h`ファイルからボード固有ラベルを除去し、ボード知識をoverlayに移す。
-**変更後にPicoとMCXA153で動作確認してから M5-b に進む。**
-
-#### ADC: `chosen` で統一
 ```dts
-/* rpi_pico.overlay に追加 */
-/ { chosen { ij-adc = <&adc>; }; };
-/* frdm_mcxa153.overlay に追加 */
-/ { chosen { ij-adc = <&lpadc0>; }; };
-```
-```c
-/* ichigojam-io.h: DT_NODELABEL(adc)/DT_NODELABEL(lpadc0) の #elif を削除 */
-#define _IJ_ADC DEVICE_DT_GET(DT_CHOSEN(ij_adc))
-```
+/* ✓ 正しい（Type.PATH として edtlib が解釈し DT_CHOSEN_xxx_EXISTS を生成） */
+chosen {
+    ij-adc = &lpadc0;
+    ij-i2c = &lpi2c0;
+};
 
-#### 音源PWM: `pwm_dt_spec` で統一
-```dts
-/* rpi_pico.overlay の zephyr,user に追加 */
-ij-sound-pwms = <&pwm 4 1000 PWM_POLARITY_NORMAL>;
-/* frdm_mcxa153.overlay の zephyr,user に追加 */
-ij-sound-pwms = <&ctimer0 0 1000 PWM_POLARITY_NORMAL>;
-```
-```c
-/* sound.h: DT_NODELABEL(pwm)/#elif ctimer0/#elif flexpwm の3段を削除 */
-static const struct pwm_dt_spec _snd =
-    PWM_DT_SPEC_GET(DT_PATH(zephyr_user), ij_sound_pwms);
-```
-
-#### I2C: `chosen` で統一
-```dts
-/* rpi_pico.overlay に追加 */
-/ { chosen { ij-i2c = <&i2c0>; }; };
-/* frdm_mcxa153.overlay に追加 */
-/ { chosen { ij-i2c = <&lpi2c0>; }; };
-```
-```c
-/* ichigojam-io.h: i2c0/lpi2c0 の #elif を削除 */
-#define _IJ_I2C_DEV DEVICE_DT_GET(DT_CHOSEN(ij_i2c))
-```
-
-#### IJB_pwm（OUT1〜6）: `pwm_dt_spec` で統一
-```dts
-/* rpi_pico.overlay の zephyr,user に追加 */
-ij-pwm1-pwms = <&pwm 8 20000000 PWM_POLARITY_NORMAL>;
-ij-pwm2-pwms = <&pwm 9 20000000 PWM_POLARITY_NORMAL>;
-/* ... OUT3〜6も同様 */
-/* frdm_mcxa153.overlay の zephyr,user に追加 */
-ij-pwm1-pwms = <&flexpwm0_pwm0 0 20000000 PWM_POLARITY_NORMAL>;
-/* ... */
-```
-```c
-/* ichigojam-io.h: RP2040とFlexPWMの2系統実装をループ1本に統一 */
-static const struct pwm_dt_spec _pwm_out[] = {
-    PWM_DT_SPEC_GET(DT_PATH(zephyr_user), ij_pwm1_pwms),
-    PWM_DT_SPEC_GET(DT_PATH(zephyr_user), ij_pwm2_pwms),
-    /* ... */
+/* ✗ 間違い（Type.PHANDLE → to_path() が DTError → マクロ未生成 → 機能しない） */
+chosen {
+    ij-adc = <&lpadc0>;
+    ij-i2c = <&lpi2c0>;
 };
 ```
 
-**注意: RP2040のFUNCSEL直叩きは `pwm_dt_spec` 化後も残る。**
-`pwm_dt_spec` はデバイス+チャンネル+周期の抽象化であり、
-GPIO→PWMのpinmux切り替えは含まない。
-`pwm_set()` の前後に `IO_BANK0 GPIO_CTRL` 操作が引き続き必要。
-`#if defined(CONFIG_SOC_SERIES_RP2040)` で閉じた上で理由をコメント明記。
-
-#### ADC chosenへの移行時の注意
-`chosen { ij-adc }` でデバイスだけを渡す。
-チャンネルごとの `gain`/`reference`/`input_positive` 設定は
-引き続きoverlayの `channel@N` ノードで定義する（現状維持）。
-`_adc_read()` 内の `lpadc0` 固有チャンネルマッピング（`mcxa_hw_ch[]`）は
-overlayの `channel@N` 定義が正しければ不要になる可能性がある—要確認。
-
 ---
 
-### M5-b: FRDM-MCXC444 ポート
+## M5-b: FRDM-MCXC444 ポート
 
-M5-a 完了後、`boards/frdm_mcxc444.overlay` を新規作成するだけで動くはず。
-`.h`ファイルは変更しない。
+M5-a 完了済みのため、`boards/frdm_mcxc444.overlay` を新規作成するだけで動くはず。
+`.h` ファイルは変更しない。
 
-MCXC444 固有の注意点：
-- FlexPWM なし → 音源は `ctimer0` の PWM ドライバを `ij-sound-pwms` に指定
-- IJB_pwm は CTimer または TPM を `ij-pwm1-pwms` 等に指定
-- ADC チャンネルは `chosen { ij-adc = <&...>; }` に指定
+### M5-b 開始前にやること
+1. **`@ARUN` 動作確認**（MCXA153 / Pico 両方で確認推奨）
+2. `boards/frdm_mcxc444.overlay` を新規作成
+
+### MCXC444 固有の注意点
+- FlexPWM なし → 音源は `ctimer0` の PWM ドライバを `pwms` "sound" に指定
+- IJB_pwm は CTimer または TPM を `pwms` "out1"〜"out6" に指定
+- ADC は `chosen { ij-adc = &...; }` に指定（`< >` なし）
 
 ```zsh
 west build -b frdm_mcxc444
