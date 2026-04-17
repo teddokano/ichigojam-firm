@@ -1,99 +1,141 @@
  FRDM-MCXC444 — IchigoJam_Z ピン対応表
  ═══════════════════════════════════════════════════════════════════════════
+ 出典: FRDM-MCXC444回路図 (SCH-65440) + r01lib ピンテーブル + MCXC444VLH-pinctrl.h
 
- Arduinoヘッダ (J7:電源, J9:アナログ, J10:デジタルLO, J5:デジタルHI)
+ Arduinoヘッダ (J2:電源, J1:アナログ+I2C, J3:デジタルLO, ※J4:デジタルHI)
  ─────────────────────────────────────────────────────────────────────────
- ※ D2-D13のArduino位置はFRDM-KL25Z実績から推定。実基板の回路図で要確認。
+ ※ D0/D1はUART専用(半二重)、D4はSW3兼用、D6はBLUE LED兼用
 
                       ┌────────────────────┐
- IOREF ──────────── [IOREF]              [D19] ─────────── I2C SCL  PTE24 (I2C0)
- RESET ──────────── [RST  ]              [D18] ─────────── I2C SDA  PTE25 (I2C0)
-  3.3V ──────────── [3.3V ]              [D13] ─────────── OUT2     PTD1  (TPM0_CH1)
-    5V ──────────── [5V   ]              [D12] ─────────── OUT3     PTD3  (TPM0_CH3)
-   GND ──────────── [GND  ]              [D11] ────────────          PTD2
-   GND ──────────── [GND  ]              [D10] ─────────── OUT1     PTD0  (TPM0_CH0)
-   VIN ──────────── [VIN  ]              [D9 ] ────────────          PTC4
-                    [     ]              [D8 ] ────────────          PTC0
- IN1/ANA(1) ─────── [A0   ]  ADC0_SE0   [D7 ] ────────────          PTC1
- IN2/ANA(2) ─────── [A1   ]  ADC0_SE4a  [D6 ] ────────────          PTD6
- IN3/ANA(3) ─────── [A2   ]  ADC0_SE3   [D5 ] ────────────          PTD5  ※GREEN LED
- IN4/ANA(4) ─────── [A3   ]  ADC0_SE7a  [D4 ] ────────────          PTA13
-                    [A4   ]  I2C SCL    [D3 ] ────────────          PTA12
-                    [A5   ]  I2C SDA    [D2 ] ────────────          PTD4
-                    [     ]              [D1 ] ────────────          PTA2  (UART TX)
-                    [     ]              [D0 ] ────────────          PTA1  (UART RX)
+ IOREF ──────────── [IOREF]              [D19] ── I2C SCL   PTE1  (I2C1, MUX6)
+ RESET ──────────── [RST  ]              [D18] ── I2C SDA   PTE0  (I2C1, MUX6)
+  3.3V ──────────── [3.3V ]              [D13] ── (GREEN LED) PTD5 (TPM0_CH5)
+    5V ──────────── [5V   ]              [D12] ── (ARD_MISO)  PTD7
+   GND ──────────── [GND  ]              [D11] ── (ARD_MOSI)  PTD6
+   GND ──────────── [GND  ]              [D10] ── (ARD_CS)    PTD4 (TPM0_CH4)
+   VIN ──────────── [VIN  ]              [D9 ] ──             PTD2 (TPM0_CH2)
+                    [     ]              [D8 ] ──             PTA13(TPM1_CH1)
+ IN1/ANA(1) ─────── [A0   ]  ADC0_SE8   [D7 ] ── OUT6       PTE30(TPM0_CH3)
+ IN2/ANA(2) ─────── [A1   ]  ADC0_SE9   [D6 ] ── OUT5 ※BLUE PTE29(TPM0_CH2)
+ IN3/ANA(3) ─────── [A2   ]  ADC0_SE12  [D5 ] ── OUT4       PTA5 (TPM0_CH2)
+ IN4/ANA(4) ─────── [A3   ]  ADC0_SE13  [D4 ] ── OUT3 ※SW3  PTA4 (TPM0_CH1)
+ (MB_SDA) ───────── [A4   ]  I2C1_SDA   [D3 ] ── OUT2       PTA12(TPM1_CH0)
+ (MB_SCL) ───────── [A5   ]  I2C1_SCL   [D2 ] ── OUT1       PTD3 (TPM0_CH3)
+                    [     ]              [D1 ] ── UART TX    PTA2
+                    [     ]              [D0 ] ── UART RX    PTA1
                     └────────────────────┘
 
- ※ D12/OUT3 (PTD3) は SPI0_MISO との共用ピン（SPI 未使用）
- ※ D13/OUT2 (PTD1) は SPI0_SCK との共用ピン（SPI 未使用）
+ ※ OUT3(D4/PTA4) は SW3(user_button_3) と同ピン。OUT3使用中はSW3として機能しない
+ ※ OUT5(D6/PTE29) は BLUE LED と同ピン。OUT5=HIGH で青LED点灯（active LOW 反転注意）
+ ※ I2C は A4/A5(PTC2/PTC1) も I2C1_SDA/SCL に使用可（同一バス）
+ ※ D19/D18 は i2c0(PTE24/25、加速度センサー専用) ではなく i2c1 を使用すること
 
  オンボードリソース
  ─────────────────────────────────────────────────────────────────────────
- LED  ── RED LED   PTE31 (GPIOE 31, active LOW)  ← LED コマンド
- BTN  ── SW2       PTC3  (GPIOC  3, active LOW)  ← BTN() コマンド
-         SW3       PTA4  (active LOW)             ← 未使用
+ RED LED  ── PTE31 (GPIOE 31, active LOW)  ← LED コマンド
+ GREEN LED── PTD5  (GPIOD  5, active LOW, D13/ARD_SCK)
+ BLUE LED ── PTE29 (GPIOE 29, active LOW, D6/OUT5 兼用)
+ BTN (SW2)── PTC3  (GPIOC  3, active LOW) ← BTN() コマンド
+ SW3      ── PTA4  (GPIOA  4, active LOW, D4/OUT3 兼用)
 
- OUT4-OUT6 / SOUND は Arduinoヘッダ外のピン
+ SOUND は Arduino J4 ヘッダ内側列（inner row）
  ─────────────────────────────────────────────────────────────────────────
- OUT4   PTB0  (GPIOB  0, TPM1_CH0) ─── 要確認: mikroBUS / Pmod / テストパッド
- OUT5   PTB1  (GPIOB  1, TPM1_CH1) ─── 要確認: mikroBUS / Pmod / テストパッド
- OUT6   PTB18 (GPIOB 18, TPM2_CH0) ─── 要確認: Pmod J18 等
- SOUND  PTB19 (TPM2_CH1)           ─── 要確認: Pmod J18 等
+ SOUND  PTB18 (TPM2_CH0, MUX3) ── J4 inner row, D0 内側端子
+ (参考) PTB19 (TPM2_CH1, MUX3) ── J4 inner row, D1 内側端子
+
+ J4 コネクタ 内側/外側列対応（D0〜D3）:
+   内側(inner)  外側(outer=標準Arduino)
+   PTB18  ──  PTA1  (D0 / UART RX)
+   PTB19  ──  PTA2  (D1 / UART TX)
+   PTB16  ──  PTD3  (D2 / OUT1)
+   PTB17  ──  PTA12 (D3 / OUT2)
 
  ─────────────────────────────────────────────────────────────────────────
 
  コマンド対応表
  ┌──────────────────┬────────────┬──────────────┬──────────────────────────────┐
- │ IchigoJam        │ MCUピン    │ コネクタ(推定)│ 備考                         │
+ │ IchigoJam        │ MCUピン    │ コネクタ     │ 備考                         │
  ├──────────────────┼────────────┼──────────────┼──────────────────────────────┤
- │ OUT 1, n         │ PTD0       │ D10          │ デジタル出力 (n=0/1)         │
- │ OUT 2, n         │ PTD1       │ D13          │                              │
- │ OUT 3, n         │ PTD3       │ D12          │                              │
- │ OUT 4, n         │ PTB0       │ 要確認       │                              │
- │ OUT 5, n         │ PTB1       │ 要確認       │                              │
- │ OUT 6, n         │ PTB18      │ 要確認       │                              │
+ │ OUT 1, n         │ PTD3       │ D2           │ デジタル出力 (n=0/1)         │
+ │ OUT 2, n         │ PTA12      │ D3           │                              │
+ │ OUT 3, n         │ PTA4       │ D4           │ SW3ボタンと共用              │
+ │ OUT 4, n         │ PTA5       │ D5           │                              │
+ │ OUT 5, n         │ PTE29      │ D6           │ BLUE LEDと共用               │
+ │ OUT 6, n         │ PTE30      │ D7           │                              │
  ├──────────────────┼────────────┼──────────────┼──────────────────────────────┤
- │ IN(1) / ANA(1)   │ PTE20      │ A0           │ デジタル読取不可 / ADC0_SE0  │
- │ IN(2) / ANA(2)   │ PTE21      │ A1           │ デジタル読取不可 / ADC0_SE4a │
- │ IN(3) / ANA(3)   │ PTE22      │ A2           │ デジタル読取不可 / ADC0_SE3  │
- │ IN(4) / ANA(4)   │ PTE23      │ A3           │ デジタル読取不可 / ADC0_SE7a │
+ │ IN(1) / ANA(1)   │ PTB0       │ A0           │ デジタル読取可 / ADC0_SE8    │
+ │ IN(2) / ANA(2)   │ PTB1       │ A1           │ デジタル読取可 / ADC0_SE9    │
+ │ IN(3) / ANA(3)   │ PTB2       │ A2           │ デジタル読取可 / ADC0_SE12   │
+ │ IN(4) / ANA(4)   │ PTB3       │ A3           │ デジタル読取可 / ADC0_SE13   │
  ├──────────────────┼────────────┼──────────────┼──────────────────────────────┤
  │ LED n            │ PTE31      │ オンボード   │ RED LED (active LOW、反転)   │
  │ BTN()            │ PTC3       │ SW2          │ active LOW                   │
  ├──────────────────┼────────────┼──────────────┼──────────────────────────────┤
- │ PWM 1, plen{,len}│ PTD0       │ D10          │ TPM0_CH0                     │
- │ PWM 2, plen{,len}│ PTD1       │ D13          │ TPM0_CH1                     │
- │ PWM 3, plen{,len}│ PTD3       │ D12          │ TPM0_CH3                     │
- │ PWM 4, plen{,len}│ PTB0       │ 要確認       │ TPM1_CH0                     │
- │ PWM 5, plen{,len}│ PTB1       │ 要確認       │ TPM1_CH1                     │
- │ PWM 6, plen{,len}│ PTB18      │ 要確認       │ TPM2_CH0 ※SOUNDと同TPM2共有 │
+ │ PWM 1, plen{,len}│ PTD3       │ D2           │ TPM0_CH3                     │
+ │ PWM 2, plen{,len}│ PTA12      │ D3           │ TPM1_CH0                     │
+ │ PWM 3, plen{,len}│ PTA4       │ D4           │ TPM0_CH1                     │
+ │ PWM 4, plen{,len}│ PTA5       │ D5           │ TPM0_CH2                     │
+ │ PWM 5, plen{,len}│ PTE29      │ D6           │ TPM0_CH2 ※PWM4と同チャンネル │
+ │ PWM 6, plen{,len}│ PTE30      │ D7           │ TPM0_CH3 ※PWM1と同チャンネル │
  ├──────────────────┼────────────┼──────────────┼──────────────────────────────┤
- │ BEEP / PLAY      │ PTB19      │ 要確認       │ TPM2_CH1（音声）             │
- │ I2C()            │ PTE24/25   │ D18/D19      │ I2C0 SCL/SDA                 │
+ │ BEEP / PLAY      │ PTB18      │ MikroBUS PWM │ TPM2_CH0（音声）             │
+ │ I2C()            │ PTE1/PTE0  │ D19/D18      │ i2c1 SCL/SDA                 │
  │ UART TX/RX       │ PTA2/PTA1  │ D1/D0        │ J-Link USB経由               │
  └──────────────────┴────────────┴──────────────┴──────────────────────────────┘
 
- IN(0) のビット構成（何も接続しない状態）
- bit:  10     9     8     7     6     5     4     3        2        1        0
-      OUT6  OUT5  BTN   OUT4  OUT3  OUT2  OUT1  IN4/ANA4 IN3/ANA3 IN2/ANA2 IN1/ANA1
- pin: PTB18 PTB1  PTC3  PTB0  PTD3  PTD1  PTD0  PTE23    PTE22    PTE21    PTE20
+ IN(0) のビット構成
+ bit:  10     9     8    7     6     5     4     3        2        1        0
+      OUT6  OUT5  BTN  OUT4  OUT3  OUT2  OUT1  IN4/ANA4 IN3/ANA3 IN2/ANA2 IN1/ANA1
+ pin: PTE30 PTE29 PTC3 PTA5  PTA4  PTA12 PTD3  PTB3     PTB2     PTB1     PTB0
 
  PWM 周期共有の制約（Kinetis TPM の仕様）
  ─────────────────────────────────────────────────────────────────────────
  Kinetis TPM は同一モジュール内の全チャンネルが周期レジスタ(MOD)を共有する。
-   TPM0 共有: OUT1(CH0)、OUT2(CH1)、OUT3(CH3) は同一周期
-              ※ PWM 1/2/3 を同時使用する場合、周期は共通になる
-   TPM1 共有: OUT4(CH0)、OUT5(CH1) は同一周期
-              ※ PWM 4/5 を同時使用する場合、周期は共通になる
-   TPM2 共有: OUT6(CH0)、SOUND(CH1) は同一周期
-              ※ BEEP/PLAY と PWM 6 の同時使用は周期が干渉する
 
- 実装上の注意
+   TPM0 共有 (OUT1/3/4/5/6):
+     CH1=OUT3(PTA4), CH2=OUT4(PTA5)/OUT5(PTE29), CH3=OUT1(PTD3)/OUT6(PTE30)
+     ・PWM4 と PWM5 は同一チャンネル(CH2) → 同時に異なるデューティ設定不可
+     ・PWM1 と PWM6 は同一チャンネル(CH3) → 同時に異なるデューティ設定不可
+     ・PWM1/3/4/5/6 は同一周期のみ設定可（サーボは同一周期なら問題なし）
+
+   TPM1 独立 (OUT2のみ):
+     CH0=OUT2(PTA12) → TPM0/TPM2 と無関係に周期設定可
+
+   TPM2 独立 (SOUNDのみ):
+     CH0=SOUND(PTB18) → BEEP/PLAY が OUT1〜6 の PWM 周期に一切干渉しない
+
+ overlay での PWM エントリ順（pwm-names と対応）
  ─────────────────────────────────────────────────────────────────────────
- - IN1-IN4 はアナログ専用ピン（ADC_SE端子）のため、IN() のビット0-3 は常に0
-   ANA(1)〜ANA(4) でアナログ読み取りのみ使用可
- - OUT ピンから PWM への切り替え・復帰は ichigojam-io.h の ij-out-tpm-pcr
-   で定義した PORT_PCR への直接書き込みで実施（Zephyr にランタイム pinmux API なし）
- - D10/D12/D13 (PTD0/PTD3/PTD1) のコネクタ位置は FRDM-KL25Z パターンからの推定
-   実基板の回路図 (FRDM-MCXC444 UM11894) で必ず確認すること
+   pwms[0] sound: &tpm2 ch0 → PTB18
+   pwms[1] out1:  &tpm0 ch3 → PTD3
+   pwms[2] out2:  &tpm1 ch0 → PTA12
+   pwms[3] out3:  &tpm0 ch1 → PTA4
+   pwms[4] out4:  &tpm0 ch2 → PTA5    ← out5(PTE29)と同チャンネル
+   pwms[5] out5:  &tpm0 ch2 → PTE29   ← out4(PTA5)と同チャンネル
+   pwms[6] out6:  &tpm0 ch3 → PTE30   ← out1(PTD3)と同チャンネル
+
+ PORT_PCR 復元テーブル（ij-out-tpm-pcr、GPIO→TPMピンマックス復元用）
+ ─────────────────────────────────────────────────────────────────────────
+   PORT base: A=0x40049000 B=0x4004A000 C=0x4004B000 D=0x4004C000 E=0x4004D000
+
+   OUT1: PORTD(0x4004C000), pin  3, ALT4 (TPM0_CH3)
+   OUT2: PORTA(0x40049000), pin 12, ALT3 (TPM1_CH0)
+   OUT3: PORTA(0x40049000), pin  4, ALT3 (TPM0_CH1)
+   OUT4: PORTA(0x40049000), pin  5, ALT3 (TPM0_CH2)
+   OUT5: PORTE(0x4004D000), pin 29, ALT3 (TPM0_CH2)
+   OUT6: PORTE(0x4004D000), pin 30, ALT3 (TPM0_CH3)
+
+ ADC チャンネルマッピング（ichigojam-io.h の mcxc_hw_ch[]）
+ ─────────────────────────────────────────────────────────────────────────
+   IN1/ANA(1): PTB0 → ADC0_SE8  → channel_id = 8
+   IN2/ANA(2): PTB1 → ADC0_SE9  → channel_id = 9
+   IN3/ANA(3): PTB2 → ADC0_SE12 → channel_id = 12
+   IN4/ANA(4): PTB3 → ADC0_SE13 → channel_id = 13
+
+ I2C 注意事項
+ ─────────────────────────────────────────────────────────────────────────
+   i2c0 (PTE24/PTE25): オンボード FXLS8974 加速度センサー専用
+                        ユーザー利用不可（r01lib 「no availability」）
+   i2c1 (PTE1/PTE0):   D19(SCL)/D18(SDA) = ユーザー I2C ← ij-i2c = &i2c1
+                        A5(PTC1)/A4(PTC2) も同一 i2c1 バスに接続可
  ═══════════════════════════════════════════════════════════════════════════
