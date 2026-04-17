@@ -16,8 +16,8 @@ IchigoJam BASIC を Zephyr RTOS 上で動かすプロジェクト。
 
 ## 現在の状態
 
-**M0〜M5a 完了。Pico（rpi_pico）と FRDM-MCXA153 の両ボードで動作確認済み。**
-**作業ブランチ: `zephyr-m5`（M5b はここから開始する）**
+**M0〜M5b 完了。Pico（rpi_pico）・FRDM-MCXA153・FRDM-MCXC444 の3ボードでビルド確認済み。**
+**作業ブランチ: `zephyr-m5`（M6 はここから開始する）**
 
 | | 内容 | 状態 |
 |---|---|---|
@@ -27,7 +27,7 @@ IchigoJam BASIC を Zephyr RTOS 上で動かすプロジェクト。
 | M3 | PWM/PSG + WAIT | 完了 |
 | M4 | I2C + USR() | 完了 |
 | M5a | HALリファクタリング（overlay統一） | 完了 |
-| M5b | FRDM-MCXC444 ポート | 未着手 |
+| M5b | FRDM-MCXC444 ポート | 完了（要実機確認） |
 | M6 | CVBSビデオ出力（Pico先行） | 未着手 |
 | M7 | FRDM-MCXC444 + CVBS | 未着手 |
 
@@ -321,19 +321,32 @@ chosen {
 
 ---
 
-## M5-b: FRDM-MCXC444 ポート
+## M5-b: FRDM-MCXC444 ポート（完了）
 
-M5-a 完了済みのため、`boards/frdm_mcxc444.overlay` を新規作成するだけで動くはず。
-`.h` ファイルは変更しない。
+`boards/frdm_mcxc444.overlay` を新規作成。
+`.h` の変更が2点必要だった（overlay-only には収まらなかった）。
 
-### M5-b 開始前にやること
-1. **`@ARUN` 動作確認**（MCXA153 / Pico 両方で確認推奨）
-2. `boards/frdm_mcxc444.overlay` を新規作成
+### 実装内容
+- `boards/frdm_mcxc444.overlay` 新規作成
+  - TPM0(OUT1-3), TPM1(OUT4-5), TPM2(OUT6/SOUND) のピンctrl + 有効化
+  - ADC0 の SE4a/SE7a チャンネル追加
+  - `/chosen { ij-adc = &adc0; ij-i2c = &i2c0; }`
+  - `ij-out-tpm-pcr` で PORT_PCR アドレス/ピン/MUX値を overlay に記述
+- `src/ichigojam-io.h` 2点修正
+  1. Kinetis ADC16 チャンネル設定: `channel_id` = SE番号直接 (`{0,4,3,7}`)
+  2. PCR pinmux 復元: `ij-out-tpm-pcr` プロパティを `DT_PROP()` で読み取り
 
-### MCXC444 固有の注意点
-- FlexPWM なし → 音源は `ctimer0` の PWM ドライバを `pwms` "sound" に指定
-- IJB_pwm は CTimer または TPM を `pwms` "out1"〜"out6" に指定
-- ADC は `chosen { ij-adc = &...; }` に指定（`< >` なし）
+### MCXC444 固有の制約
+- ADC16: `channel_id` = SE番号直接（LPADC の `input_positive` とは異なる）
+- TPM0 共有: OUT1(CH0)/OUT2(CH1)/OUT3(CH3) は同一周期 — 3つ同時使用時は共通周期
+- TPM2 共有: OUT6(CH0)/SOUND(CH1) — BEEP/PLAY と PWM 6 同時使用不可
+- IN1-IN4 はアナログ専用（デジタル読み取り不可）
+
+### ピンアサイン（ヘッダ外のピンは要実機確認）
+- OUT1=PTD0(D10), OUT2=PTD1(D13), OUT3=PTD3(D12)
+- OUT4=PTB0, OUT5=PTB1, OUT6=PTB18 — mikroBUS/Pmod/テストパッド（要確認）
+- SOUND=PTB19 — 要確認
+- 詳細: `IchigoJam_Z/pinmap/frdm_mcxc444/frdm_mcxc444.txt`
 
 ```zsh
 west build -b frdm_mcxc444
