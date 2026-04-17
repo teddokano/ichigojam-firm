@@ -63,10 +63,10 @@
  │ OUT 5, n         │ PTE29      │ D6           │ BLUE LEDと共用               │
  │ OUT 6, n         │ PTE30      │ D7           │                              │
  ├──────────────────┼────────────┼──────────────┼──────────────────────────────┤
- │ IN(1) / ANA(1)   │ PTB0       │ A0           │ デジタル読取可 / ADC0_SE8    │
- │ IN(2) / ANA(2)   │ PTB1       │ A1           │ デジタル読取可 / ADC0_SE9    │
- │ IN(3) / ANA(3)   │ PTB2       │ A2           │ デジタル読取可 / ADC0_SE12   │
- │ IN(4) / ANA(4)   │ PTB3       │ A3           │ デジタル読取可 / ADC0_SE13   │
+ │ ANA(1) [IN(1)=0] │ PTB0       │ A0           │ ANA()専用（※1）/ ADC0_SE8   │
+ │ ANA(2) [IN(2)=0] │ PTB1       │ A1           │ ANA()専用（※1）/ ADC0_SE9   │
+ │ ANA(3) [IN(3)=0] │ PTB2       │ A2           │ ANA()専用（※1）/ ADC0_SE12  │
+ │ ANA(4) [IN(4)=0] │ PTB3       │ A3           │ ANA()専用（※1）/ ADC0_SE13  │
  ├──────────────────┼────────────┼──────────────┼──────────────────────────────┤
  │ LED n            │ PTE31      │ オンボード   │ RED LED (active LOW、反転)   │
  │ BTN()            │ PTC3       │ SW2          │ active LOW                   │
@@ -78,7 +78,7 @@
  │ PWM 5, plen{,len}│ PTE29      │ D6           │ TPM0_CH2 ※PWM4と同チャンネル │
  │ PWM 6, plen{,len}│ PTE30      │ D7           │ TPM0_CH3 ※PWM1と同チャンネル │
  ├──────────────────┼────────────┼──────────────┼──────────────────────────────┤
- │ BEEP / PLAY      │ PTB18      │ MikroBUS PWM │ TPM2_CH0（音声）             │
+ │ BEEP / PLAY      │ PTB18      │ J4内側(D0内) │ TPM2_CH0（音声）             │
  │ I2C()            │ PTE1/PTE0  │ D19/D18      │ i2c1 SCL/SDA                 │
  │ UART TX/RX       │ PTA2/PTA1  │ D1/D0        │ J-Link USB経由               │
  └──────────────────┴────────────┴──────────────┴──────────────────────────────┘
@@ -87,6 +87,8 @@
  bit:  10     9     8    7     6     5     4     3        2        1        0
       OUT6  OUT5  BTN  OUT4  OUT3  OUT2  OUT1  IN4/ANA4 IN3/ANA3 IN2/ANA2 IN1/ANA1
  pin: PTE30 PTE29 PTC3 PTA5  PTA4  PTA12 PTD3  PTB3     PTB2     PTB1     PTB0
+ ※1 PTB0-3 はアナログモード(MUX0)で設定されるため IN() のデジタル読取は常に 0 を返す
+     ANA(1)〜ANA(4) のみ有効（ADC0_SE8/SE9/SE12/SE13）
 
  PWM 周期共有の制約（Kinetis TPM の仕様）
  ─────────────────────────────────────────────────────────────────────────
