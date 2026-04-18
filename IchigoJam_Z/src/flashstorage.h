@@ -31,8 +31,16 @@ void flash_init(void)
         return;
     }
 
-    _nvs.sector_size  = info.size;
-    _nvs.sector_count = (uint16_t)(fa->fa_size / info.size);
+    /* NVS sector_size must be large enough to hold one BASIC program entry.
+     * SIZE_RAM_LIST = 1026 bytes; NVS overhead per sector ≈ 20 bytes.
+     * On boards with 1 KB erase blocks (e.g. MCXC444 FTFA), the default
+     * sector_size = 1024 would be too small.  Round up to a multiple of
+     * the hardware erase block that covers at least 2 KB. */
+    _nvs.sector_size = info.size;
+    while (_nvs.sector_size < 2048U) {
+        _nvs.sector_size += info.size;
+    }
+    _nvs.sector_count = (uint16_t)(fa->fa_size / _nvs.sector_size);
     flash_area_close(fa);
 
     if (nvs_mount(&_nvs) == 0) {
