@@ -1,0 +1,6 @@
+10 print "ANA test"
+20 print ana(1);
+30 print "  ";
+40 print ana(2)
+90 wait 6
+100 goto 20
