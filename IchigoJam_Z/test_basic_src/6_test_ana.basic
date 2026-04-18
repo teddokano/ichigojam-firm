@@ -6,5 +6,5 @@
 60 print ana(3);
 70 print "  ";
 80 print ana(4)
-90 wait 6
+90 wait 30
 100 goto 20
