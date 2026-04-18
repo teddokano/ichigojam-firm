@@ -1,2 +1,5 @@
 build/
 .cache/
+hardware_map.yaml
+*.save
+*.CoolTermSettings

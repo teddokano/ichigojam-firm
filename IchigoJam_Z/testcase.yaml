@@ -7,7 +7,7 @@ common:
   harness_config:
     type: one_line
     regex:
-      - "IchigoJam BASIC 1\\.4 Zephyr frdm_mcxa153"
+      - "IchigoJam BASIC 1\\.4 Zephyr"
   timeout: 15
 
 tests:
@@ -15,3 +15,5 @@ tests:
     tags: boot splash
     platform_allow:
       - frdm_mcxa153
+      - rpi_pico
+      - frdm_mcxc444
