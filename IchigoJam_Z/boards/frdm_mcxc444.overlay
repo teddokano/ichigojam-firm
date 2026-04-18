@@ -14,7 +14,7 @@
  *         (CH2=PTE29/OUT5 already in BSP group0)
  *   tpm1: CH0=PTA12(OUT2)
  *   tpm2: CH0=PTB18(SOUND)
- *   adc0: adds PTE21(SE4a)/PTE23(SE7a); PTE20(SE0)/PTE22(SE3) already in BSP
+ *   adc0: adds PTB0-3 (SE8/SE9/SE12/SE13) for IN1-IN4
  *   i2c1: PTE0(SDA)/PTE1(SCL) for user I2C (D18/D19)
  *
  * Pin assignments (Arduino header):
@@ -27,10 +27,10 @@
  *   OUT5   PTE29 / TPM0_CH2  / D6  [BLUE LED shared pin, active LOW]
  *   OUT6   PTE30 / TPM0_CH3  / D7
  *   SOUND  PTB18 / TPM2_CH0      — J4 inner row, D0 内側端子
- *   IN1/ANA(1)  PTE20 — ADC0_SE0  (Arduino A0)
- *   IN2/ANA(2)  PTE21 — ADC0_SE4a (Arduino A1)
- *   IN3/ANA(3)  PTE22 — ADC0_SE3  (Arduino A2)
- *   IN4/ANA(4)  PTE23 — ADC0_SE7a (Arduino A3)
+ *   IN1/ANA(1)  PTB0 — ADC0_SE8  (Arduino A0)
+ *   IN2/ANA(2)  PTB1 — ADC0_SE9  (Arduino A1)
+ *   IN3/ANA(3)  PTB2 — ADC0_SE12 (Arduino A2)
+ *   IN4/ANA(4)  PTB3 — ADC0_SE13 (Arduino A3)
  *   I2C SCL     PTE1 (I2C1_SCL)  / D19
  *   I2C SDA     PTE0 (I2C1_SDA)  / D18
  *
@@ -92,12 +92,14 @@
 		};
 	};
 
-	/* ADC0 pinctrl: A0(PTE20/SE0) and A2(PTE22/SE3) are already in BSP group0.
-	 * Add only A1(PTE21/SE4a) and A3(PTE23/SE7a) here. */
+	/* ADC0 pinctrl: add IN1-IN4 channels PTB0-3.
+	 * BSP group0 has PTE20(SE0)/PTE22(SE3) — unused but harmless. */
 	pinmux_adc0: pinmux_adc0 {
-		group1 {
-			pinmux = <ADC0_SE4a_PTE21>,  /* A1 = ANA(2) / IN(2) */
-				 <ADC0_SE7a_PTE23>;  /* A3 = ANA(4) / IN(4) */
+		group_ptb {
+			pinmux = <ADC0_SE8_PTB0>,    /* A0 = ANA(1) / IN(1) */
+				 <ADC0_SE9_PTB1>,    /* A1 = ANA(2) / IN(2) */
+				 <ADC0_SE12_PTB2>,   /* A2 = ANA(3) / IN(3) */
+				 <ADC0_SE13_PTB3>;   /* A3 = ANA(4) / IN(4) */
 			drive-strength = "low";
 			slew-rate = "slow";
 		};
@@ -144,10 +146,10 @@
 		ij-out4-gpios = <&gpioa  5 GPIO_ACTIVE_HIGH>;  /* PTA5  / D5 */
 		ij-out5-gpios = <&gpioe 29 GPIO_ACTIVE_HIGH>;  /* PTE29 / D6 (BLUE LED shared) */
 		ij-out6-gpios = <&gpioe 30 GPIO_ACTIVE_HIGH>;  /* PTE30 / D7 */
-		ij-in1-gpios  = <&gpioe 20 GPIO_ACTIVE_HIGH>;  /* PTE20 = ADC0_SE0  / A0 */
-		ij-in2-gpios  = <&gpioe 21 GPIO_ACTIVE_HIGH>;  /* PTE21 = ADC0_SE4a / A1 */
-		ij-in3-gpios  = <&gpioe 22 GPIO_ACTIVE_HIGH>;  /* PTE22 = ADC0_SE3  / A2 */
-		ij-in4-gpios  = <&gpioe 23 GPIO_ACTIVE_HIGH>;  /* PTE23 = ADC0_SE7a / A3 */
+		ij-in1-gpios  = <&gpiob  0 GPIO_ACTIVE_HIGH>;  /* PTB0 = ADC0_SE8  / A0 */
+		ij-in2-gpios  = <&gpiob  1 GPIO_ACTIVE_HIGH>;  /* PTB1 = ADC0_SE9  / A1 */
+		ij-in3-gpios  = <&gpiob  2 GPIO_ACTIVE_HIGH>;  /* PTB2 = ADC0_SE12 / A2 */
+		ij-in4-gpios  = <&gpiob  3 GPIO_ACTIVE_HIGH>;  /* PTB3 = ADC0_SE13 / A3 */
 
 		/*
 		 * PWM specs for IchigoJam sound and OUT PWM outputs.

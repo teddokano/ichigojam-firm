@@ -141,8 +141,8 @@ void io_init(void)
 #elif DT_HAS_COMPAT_STATUS_OKAY(nxp_kinetis_adc16)
             /* Kinetis ADC16 (MCXC444 etc.): channel_id IS the SE mux number.
              * ADC_REF_INTERNAL = VREFH (external pin, 3.3V on FRDM boards).
-             * Slot 0-3 → SE0(A0/PTE20), SE4a(A1/PTE21), SE3(A2/PTE22), SE7a(A3/PTE23) */
-            static const uint8_t mcxc_hw_ch[] = { 0, 4, 3, 7 };
+             * Slot 0-3 → SE8(A0/PTB0), SE9(A1/PTB1), SE12(A2/PTB2), SE13(A3/PTB3) */
+            static const uint8_t mcxc_hw_ch[] = { 8, 9, 12, 13 };
             struct adc_channel_cfg cfg = {
                 .gain             = ADC_GAIN_1,
                 .reference        = ADC_REF_INTERNAL,
@@ -248,9 +248,9 @@ S_INLINE int IJB_ana(int n)
     return _adc_read(slot);
 #elif DT_HAS_COMPAT_STATUS_OKAY(nxp_kinetis_adc16)
     /* Kinetis ADC16 (MCXC444): channel_id = SE mux number directly.
-     * ANA(1)/ANA(9)=SE0(A0/PTE20), ANA(2)=SE4a(A1/PTE21),
-     * ANA(3)=SE3(A2/PTE22), ANA(4)=SE7a(A3/PTE23) */
-    static const uint8_t mcxc_hw_ch[] = { 0, 4, 3, 7 };
+     * ANA(1)/ANA(9)=SE8(A0/PTB0), ANA(2)=SE9(A1/PTB1),
+     * ANA(3)=SE12(A2/PTB2), ANA(4)=SE13(A3/PTB3) */
+    static const uint8_t mcxc_hw_ch[] = { 8, 9, 12, 13 };
     int idx = (n == 9) ? 1 : n;
     if (idx < 1 || idx > 4) return 0;
     return _adc_read(mcxc_hw_ch[idx - 1]);
