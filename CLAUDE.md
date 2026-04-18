@@ -16,7 +16,7 @@ IchigoJam BASIC を Zephyr RTOS 上で動かすプロジェクト。
 
 ## 現在の状態
 
-**M0〜M5b 完了。Pico（rpi_pico）・FRDM-MCXA153・FRDM-MCXC444 の3ボードでビルド確認済み。**
+**M0〜M5 完了。Pico（rpi_pico）・FRDM-MCXA153・FRDM-MCXC444 の3ボードで実機動作確認済み。**
 **作業ブランチ: `zephyr-m5`（M6 はここから開始する）**
 
 | | 内容 | 状態 |
@@ -28,6 +28,7 @@ IchigoJam BASIC を Zephyr RTOS 上で動かすプロジェクト。
 | M4 | I2C + USR() | 完了 |
 | M5a | HALリファクタリング（overlay統一） | 完了 |
 | M5b | FRDM-MCXC444 ポート | 完了（実機確認済み） |
+| **M5** | **3ボード実機確認（ANA/SAVE/LOAD/PWM/I2C）** | **完了** |
 | M6 | CVBSビデオ出力（Pico先行） | 未着手 |
 | M7 | FRDM-MCXC444 + CVBS | 未着手 |
 
