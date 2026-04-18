@@ -152,6 +152,19 @@ void io_init(void)
                 cfg.channel_id = mcxc_hw_ch[i];
                 adc_channel_setup(adc, &cfg);
             }
+            /* Enable long sample mode (ADLSMP=1, ADLSTS=0 → 24 ADCK acquisition).
+             * Zephyr's adc_mcux_adc16 driver sets ADLSMP only under
+             * CONFIG_ADC_MCUX_ADC16_ENABLE_EDMA; there is no other API for it.
+             * start_read() masks only CFG1[MODE], so ADLSMP is preserved on
+             * every subsequent read.  At ADACK ≈ 4 MHz, 24 ADCK ≈ 6 µs acquisition
+             * is adequate for source impedances up to ~200 kΩ (e.g. potentiometers).
+             * Without this, short sample (3.5 ADCK ≈ 875 ns) causes non-linearity
+             * for any source above ~30 kΩ. */
+            {
+                volatile uint32_t *cfg1 =
+                    (volatile uint32_t *)(DT_REG_ADDR(DT_CHOSEN(ij_adc)) + 0x8U);
+                *cfg1 |= (1U << 4);  /* ADC_CFG1_ADLSMP = 1 */
+            }
 #else
             /* RP2040 and other boards: internal reference.
              * ch0=GPIO26(IN2), ch1=GPIO27(IN1), ch2=GPIO28(BTN) */
