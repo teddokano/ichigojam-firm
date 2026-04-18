@@ -27,7 +27,7 @@ IchigoJam BASIC を Zephyr RTOS 上で動かすプロジェクト。
 | M3 | PWM/PSG + WAIT | 完了 |
 | M4 | I2C + USR() | 完了 |
 | M5a | HALリファクタリング（overlay統一） | 完了 |
-| M5b | FRDM-MCXC444 ポート | 完了（要実機確認） |
+| M5b | FRDM-MCXC444 ポート | 完了（実機確認済み） |
 | M6 | CVBSビデオ出力（Pico先行） | 未着手 |
 | M7 | FRDM-MCXC444 + CVBS | 未着手 |
 
@@ -338,14 +338,21 @@ chosen {
 
 ### MCXC444 固有の制約
 - ADC16: `channel_id` = SE番号直接（LPADC の `input_positive` とは異なる）
-- TPM0 共有: OUT1(CH0)/OUT2(CH1)/OUT3(CH3) は同一周期 — 3つ同時使用時は共通周期
-- TPM2 共有: OUT6(CH0)/SOUND(CH1) — BEEP/PLAY と PWM 6 同時使用不可
-- IN1-IN4 はアナログ専用（デジタル読み取り不可）
+- **ADC リファレンス: `ADC_REF_VDD_1`（VALT=VDDA=3.3V）を使うこと**
+  - `ADC_REF_INTERNAL`（REFSEL=0=VREFH）は使用不可
+  - VREFH は VREF モジュール出力（~1.18V 精密リファレンス）に接続されているが、
+    VREF モジュールはデフォルト disabled → VREFH が ~0.13V に漂流する
+  - 結果: 0.13V 入力で ANA()=1023 になる（フルスケールが 0.13V になる）
+  - 公式サンプル `samples/drivers/adc/adc_dt/boards/frdm_mcxc444.overlay` も `ADC_REF_VDD_1` を使用
+- ADC ピン: IN1-IN4 = PTB0-3（SE8/SE9/SE12/SE13）= Arduino A0-A3 ヘッダ
+  - BSP の pinmux_adc0 が PTE20/PTE22 を定義しているが、それは A0-A3 ではない
+  - GND を Arduino A0 に接続して ANA(1)=0 で確認済み
+- TPM0 共有: OUT1(CH3)/OUT3(CH1)/OUT4(CH2)/OUT5(CH2)/OUT6(CH3) は同一周期
+- TPM1 独立: OUT2(CH0) のみ → 独自周期設定可
+- TPM2 独立: SOUND(CH0) → BEEP/PLAY が OUT PWM 周期に干渉しない
+- IN1-IN4 はアナログ専用（デジタル読み取り不可、MUX0=アナログモード保持のため）
 
-### ピンアサイン（ヘッダ外のピンは要実機確認）
-- OUT1=PTD0(D10), OUT2=PTD1(D13), OUT3=PTD3(D12)
-- OUT4=PTB0, OUT5=PTB1, OUT6=PTB18 — mikroBUS/Pmod/テストパッド（要確認）
-- SOUND=PTB19 — 要確認
+### ピンアサイン（実機確認済み）
 - 詳細: `IchigoJam_Z/pinmap/frdm_mcxc444/frdm_mcxc444.txt`
 
 ```zsh
