@@ -140,12 +140,16 @@ void io_init(void)
             }
 #elif DT_HAS_COMPAT_STATUS_OKAY(nxp_kinetis_adc16)
             /* Kinetis ADC16 (MCXC444 etc.): channel_id IS the SE mux number.
-             * ADC_REF_INTERNAL = VREFH (external pin, 3.3V on FRDM boards).
+             * Must use ADC_REF_VDD_1 (REFSEL=1, VALT=VDDA=3.3V), NOT ADC_REF_INTERNAL.
+             * On FRDM-MCXC444, VREFH is the VREF module output (~1.18V precision ref);
+             * the VREF module is disabled by default, leaving VREFH floating at ~0.13V.
+             * VALT = VDDA = 3.3V is always available and covers the full 0–3.3V range.
+             * (See Zephyr samples/drivers/adc/adc_dt/boards/frdm_mcxc444.overlay)
              * Slot 0-3 → SE8(A0/PTB0), SE9(A1/PTB1), SE12(A2/PTB2), SE13(A3/PTB3) */
             static const uint8_t mcxc_hw_ch[] = { 8, 9, 12, 13 };
             struct adc_channel_cfg cfg = {
                 .gain             = ADC_GAIN_1,
-                .reference        = ADC_REF_INTERNAL,
+                .reference        = ADC_REF_VDD_1,
                 .acquisition_time = ADC_ACQ_TIME_DEFAULT,
             };
             for (int i = 0; i < 4; i++) {
