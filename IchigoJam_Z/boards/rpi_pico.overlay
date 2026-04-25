@@ -57,8 +57,9 @@
 
 / {
 	chosen {
-		ij-adc = &adc;    /* ADC device for ANA()/IN() */
-		ij-i2c = &i2c0;  /* I2C device for I2C() command */
+		ij-adc        = &adc;    /* ADC device for ANA()/IN() */
+		ij-i2c        = &i2c0;  /* I2C device for I2C() command */
+		ij-cvbs-timer = &timer;  /* Counter device for CVBS line timer (M6) */
 	};
 
 	zephyr,user {
@@ -75,6 +76,9 @@
 		ij-in2-gpios  = <&gpio0 26 GPIO_ACTIVE_HIGH>;   /* ADC ch0 */
 		ij-in3-gpios  = <&gpio0  6 GPIO_ACTIVE_HIGH>;
 		ij-in4-gpios  = <&gpio0  7 GPIO_ACTIVE_HIGH>;
+		/* M6: CVBS video output pins */
+		ij-cvbs-sync-gpios  = <&gpio0 16 GPIO_ACTIVE_HIGH>;  /* SYNC → 470Ω → CVBS */
+		ij-cvbs-video-gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;  /* VIDEO→ 100Ω → CVBS */
 
 		/*
 		 * PWM specs for IchigoJam sound and OUT PWM outputs.

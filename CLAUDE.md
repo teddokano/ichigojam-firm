@@ -17,7 +17,8 @@ IchigoJam BASIC を Zephyr RTOS 上で動かすプロジェクト。
 ## 現在の状態
 
 **M0〜M5 完了。Pico（rpi_pico）・FRDM-MCXA153・FRDM-MCXC444 の3ボードで実機動作確認済み。**
-**作業ブランチ: `zephyr-m5`（M6 はここから開始する）**
+**M6 実装中（display.h + overlay 完成、実機確認待ち）。**
+**作業ブランチ: `zephyr-m5`（M6 はここから継続）**
 
 | | 内容 | 状態 |
 |---|---|---|
@@ -29,7 +30,7 @@ IchigoJam BASIC を Zephyr RTOS 上で動かすプロジェクト。
 | M5a | HALリファクタリング（overlay統一） | 完了 |
 | M5b | FRDM-MCXC444 ポート | 完了（実機確認済み） |
 | **M5** | **3ボード実機確認（ANA/SAVE/LOAD/PWM/I2C）** | **完了** |
-| M6 | CVBSビデオ出力（Pico先行） | 未着手 |
+| **M6** | **CVBSビデオ出力（Pico先行）** | **実装完了・実機確認待ち** |
 | M7 | FRDM-MCXC444 + CVBS | 未着手 |
 
 ---
@@ -365,16 +366,12 @@ west build -b frdm_mcxc444
 
 ---
 
-## M6: CVBSビデオ出力
-
-### 前回（zephyr-m4-video）の失敗原因
-レジスタ直叩き・fsl_clock.h・SPI・ISR+セマフォ+スレッドの複合構成。
-M6はZephyr APIのみで実装し直す。
+## M6: CVBSビデオ出力（実装完了・実機確認待ち）
 
 ### 回路
 ```
-GPIO(SYNC) ─── 470Ω ──┬── CVBS出力（75Ω終端のテレビへ）
-GPIO(VIDEO) ── 100Ω ───┘
+GPIO16(SYNC) ─── 470Ω ──┬── CVBS出力（75Ω終端のテレビへ）
+GPIO17(VIDEO)── 100Ω ───┘
 ```
 
 | SYNC | VIDEO | 出力電圧 | 意味 |
@@ -386,38 +383,46 @@ GPIO(VIDEO) ── 100Ω ───┘
 回路図: https://ichigojam.net/data/IchigoJam-T-howtobuild.pdf
 
 ### タイミング（NTSC）
-- 1ライン = 63.5μs、261ライン/フレーム、約60fps
+- 1ライン = 64µs（63.5µsに近似）、261ライン/フレーム、≈59.9fps
 - フレーム構成: Vsync 3ライン + ブランク 19ライン + 有効 192ライン + ブランク 47ライン
 
-### 実装方針：Zephyr `counter` API
+### 実装（`src/display.h` + `boards/rpi_pico.overlay`）
 
-PicoもMCXA153も `counter_set_channel_alarm()` 対応確認済み：
-- Pico: `timer0`（RP2040 hardware timer）
-- MCXA153: `ctimer1`（`nxp,lpc-ctimer` compatible）
+- `CONFIG_COUNTER=y` を `prj.conf` に追加
+- `chosen { ij-cvbs-timer = &timer; }` + GPIO16/17 を `rpi_pico.overlay` に追加
+- `display.h` にライン ISR `_cvbs_line_cb()` を実装
+  - 先頭で次ライン 64µs アラームを再スケジュール
+  - `frames` / `_g.linecnt` インクリメント
+  - SIO 直叩きで SYNC パルス（5µs）+ バックポーチ（5µs）を生成
+  - アクティブライン: 32 キャラクタ列 × `k_busy_wait(1)` のファットピクセル出力
+    - 各列: `CHAR_PATTERN[ch*8+row]` の OR が true なら VIDEO=H（白）
+    - 横幅は理想の 61% 程度だが文字は判読可能
+
+### RP2040 SIO 直叩き（例外として許容）
 
 ```c
-// display.h の骨格
-static void line_alarm_cb(const struct device *dev,
-                          uint8_t chan, uint32_t ticks, void *ud)
-{
-    // SYNCをLOW → 次アラームをセット → SYNCをHIGH → VIDEOピクセル出力
-    // frames / _g.linecnt インクリメント（timer_threadから移管）
-    counter_set_channel_alarm(dev, 0, &_alarm);
-}
-
-void video_on(void) {
-    SCREEN_W = 32; SCREEN_H = 24;
-    // counter_us_to_ticks() で63.5μsをtick値に変換
-    // counter_start() → counter_set_channel_alarm() で開始
-}
+/* Zephyr GPIO API (~200ns/call) は SYNC アサートのジッタが大きすぎる。
+ * SIO SET/CLR は 1 ストア命令 = ~16ns で完了する。
+ * Zephyr GPIO ドライバも内部で同じ SIO レジスタを使用しており整合性に問題なし。*/
+#define _SIO_SET (*(volatile uint32_t *)0xD0000014U)  /* GPIO_OUT_SET */
+#define _SIO_CLR (*(volatile uint32_t *)0xD0000018U)  /* GPIO_OUT_CLR */
 ```
 
-SPIもスレッドも不要。`CONFIG_COUNTER=y` を `prj.conf` に追加するだけ。
+`#if defined(CONFIG_SOC_SERIES_RP2040)` でスコープを閉じ、コメントを明記。
 
-### M6開始前のステップ
-1. `west build -b rpi_pico samples/drivers/counter/alarm` でcounter動作確認
-2. コールバック内でGPIO操作しオシロで63.5μs周期を確認
-3. 確認できたら `display.h` に本実装を追加
+### counter_cancel_channel_alarm の正式名称
+
+`counter_cancel_alarm()` は存在しない。正しくは `counter_cancel_channel_alarm(dev, chan_id)`。
+
+### CPU 占有率（実測前の試算）
+- ブランクライン（69本/フレーム）: ISR ≈ 12µs、BASIC 52µs（81% フリー）
+- アクティブライン（192本/フレーム）: ISR ≈ 44µs、BASIC 20µs（31% フリー）
+- 加重平均: BASIC 約 45% CPU → M0〜M5 と同等の実行速度を維持
+
+### 実機確認ステップ
+1. UF2 を Pico に書き込み、GPIO16/17 に回路を接続してテレビに繋ぐ
+2. オシロで GPIO16（SYNC）の 64µs 周期と 5µs パルス幅を確認
+3. テレビに起動ロゴ・BASIC プロンプトが表示されることを確認
 
 ---
 
