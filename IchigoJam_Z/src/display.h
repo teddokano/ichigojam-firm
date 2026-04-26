@@ -11,7 +11,7 @@
 //
 // 実装方針: Zephyr counter API で 64µs 周期のライン ISR を生成。
 //   1ライン = 64µs (NTSC 63.5µs に近似、60fps でテレビ同期可)
-//   261ライン/フレーム: vsync(3) + vblank(19) + active(192) + vblank(47)
+//   261ライン/フレーム: vsync(1) + vblank(20) + active(192) + vblank(48)
 //
 // アクティブライン ISR 内での映像出力:
 //   32 キャラクタ列 × k_busy_wait(1) = 32µs のファットピクセル出力。
@@ -37,19 +37,22 @@
 
 /* ── NTSC タイミング定数 ────────────────────────────────────────── */
 #define _CVBS_LINES      261    /* 総ライン数 */
-#define _CVBS_ACT_FIRST  22     /* アクティブ開始ライン (vsync3 + vblank19) */
+#define _CVBS_ACT_FIRST  21     /* アクティブ開始ライン (vsync1 + vblank20) */
 #define _CVBS_ACT_LINES  192    /* アクティブライン数 (24行 × 8px) */
 #define _CVBS_HTOTAL_US  64     /* 1ライン周期 µs */
-#define _CVBS_HSYNC_US   5      /* 水平同期パルス幅 µs */
-#define _CVBS_BACK_US    5      /* バックポーチ µs */
-#define _CVBS_VSYNC_US   32     /* 垂直同期ロングパルス µs */
+#define _CVBS_HSYNC_US   4      /* 水平同期パルス幅 µs (IchigoJam_Q 実測 ~4µs) */
+#define _CVBS_BACK_US    4      /* バックポーチ µs */
+#define _CVBS_VSYNC_US   58     /* 垂直同期ロングパルス µs (58/64=91% duty — vsync 積分器確実トリガ) */
 
 /* ── GPIO / counter バインディング ─────────────────────────────── */
-static const struct gpio_dt_spec _cvbs_sync =
+/* static を付けない: INLINE が non-static inline に展開される場合に
+ * "static variable used in non-static inline function" warning が出るため。
+ * display.h は単一 TU にのみ include されるので多重定義の心配はない。  */
+const struct gpio_dt_spec _cvbs_sync =
     GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), ij_cvbs_sync_gpios);
-static const struct gpio_dt_spec _cvbs_video =
+const struct gpio_dt_spec _cvbs_video =
     GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), ij_cvbs_video_gpios);
-static const struct device *_cvbs_ctr;
+const struct device *_cvbs_ctr;
 
 /* ── RP2040 SIO 直接アクセス ────────────────────────────────────
  * SYNC ISR 先頭での遅延を最小化するため SIO SET/CLR レジスタを直叩き。
@@ -57,27 +60,44 @@ static const struct device *_cvbs_ctr;
  * 対象: SIO_BASE=0xD0000000, GPIO_OUT_SET=+0x14, GPIO_OUT_CLR=+0x18 */
 #define _SIO_SET (*(volatile uint32_t *)0xD0000014U)
 #define _SIO_CLR (*(volatile uint32_t *)0xD0000018U)
-static uint32_t _sync_mask;    /* (1U << 16) for GPIO16 */
-static uint32_t _video_mask;   /* (1U << 17) for GPIO17 */
+uint32_t _sync_mask;    /* (1U << 16) for GPIO16 */
+uint32_t _video_mask;   /* (1U << 17) for GPIO17 */
 
 /* ── 状態変数 ───────────────────────────────────────────────────── */
-static volatile uint16_t _cvbs_line;
-static struct counter_alarm_cfg _cvbs_alarm;
-static bool _cvbs_on;
+volatile uint16_t _cvbs_line;
+struct counter_alarm_cfg _cvbs_alarm;
+bool _cvbs_on;
+/* 次ライン ISR の「本来の」絶対発火時刻 (µs, 1MHz カウンタ値)。
+ * ISR が遅延した場合でも次のアラームを本来の時刻から計算することで
+ * ジッタを1ライン内に閉じ込め、長期的な H-sync 周期を安定させる。 */
+volatile uint32_t _cvbs_next_line_time;
 
 /* ── ライン ISR ─────────────────────────────────────────────────
  * counter alarm callback。ISR 先頭で次ラインのアラームを再スケジュール
- * してから SYNC / 映像出力を行う。相対モード(64µs)で再登録するため
- * 実際の発火は約 ticks+1+64µs (1µs は ISR エントリ遅延)。
- * TV はこの程度の H-sync ジッタを許容する。                          */
-static void _cvbs_line_cb(const struct device *dev, uint8_t chan,
-                          uint32_t ticks, void *user_data)
+ * してから SYNC / 映像出力を行う。
+ *
+ * ジッタ補正: _cvbs_next_line_time (絶対時刻) を基準に次の alarm を
+ * 設定することで、ISR 遅延を 1ライン内に閉じ込め H-sync 周期を安定化。
+ * alarm0 IRQ 優先度 = 1 (overlay で設定) により SysTick (優先度 3) が
+ * 本 ISR を割り込めず、ジッタの主因を根本から除去している。           */
+void _cvbs_line_cb(const struct device *dev, uint8_t chan,
+                   uint32_t ticks, void *user_data)
 {
-    ARG_UNUSED(ticks);
     ARG_UNUSED(user_data);
 
-    /* 次ラインを今すぐ予約 (処理より前に登録して遅延を最小化) */
-    _cvbs_alarm.ticks = _CVBS_HTOTAL_US;
+    /* ── 次ライン アラームをジッタ補正付きでスケジュール ────────────
+     * ticks = このコールバックが呼ばれた時点の現在時刻 (µs)。
+     * _cvbs_next_line_time は「本来の」絶対発火時刻を保持する。
+     * ISR が遅延していても次は本来の時刻から 64µs 後に発火させることで
+     * H-sync 周期のジッタを 1ライン内に吸収し長期安定性を保つ。        */
+    _cvbs_next_line_time += _CVBS_HTOTAL_US;
+    int32_t _delay = (int32_t)(_cvbs_next_line_time - ticks);
+    if (_delay <= 0) {
+        /* 大きな遅延 (複数ライン分) が発生した場合は次周期から再同期 */
+        _cvbs_next_line_time = ticks + _CVBS_HTOTAL_US;
+        _delay = _CVBS_HTOTAL_US;
+    }
+    _cvbs_alarm.ticks = (uint32_t)_delay;
     counter_set_channel_alarm(dev, chan, &_cvbs_alarm);
 
     uint16_t ln = _cvbs_line;
@@ -85,12 +105,12 @@ static void _cvbs_line_cb(const struct device *dev, uint8_t chan,
 
     /* フレーム/ライン カウンタ更新 (TICK() / WAIT コマンドが参照) */
     _g.linecnt++;
-    if (ln == 0u) {
-        frames++;
-    }
 
-    if (ln < 3u) {
-        /* ── Vsync ライン: ロングパルス ─────────────────────────── */
+    if (ln == 0u) {
+        /* ── Vsync ライン: ロングパルス (1ライン) ───────────────── */
+        /* vsync を複数ライン連続すると TV の同期セパレータが         */
+        /* 複数回 vsync 検出し画面が乱れるため 1ライン のみ使用。    */
+        frames++;
         _SIO_CLR = _sync_mask | _video_mask;   /* SYNC=L, VIDEO=L */
         k_busy_wait(_CVBS_VSYNC_US);
         _SIO_SET = _sync_mask;                 /* SYNC=H */
@@ -147,6 +167,11 @@ INLINE void video_on(void) {
 
     _cvbs_ctr = DEVICE_DT_GET(DT_CHOSEN(ij_cvbs_timer));
     _cvbs_line = 0u;
+
+    /* 初期発火時刻を現在時刻 + 1周期に設定 */
+    uint32_t _t0;
+    counter_get_value(_cvbs_ctr, &_t0);
+    _cvbs_next_line_time = _t0 + _CVBS_HTOTAL_US;
 
     _cvbs_alarm.callback  = _cvbs_line_cb;
     _cvbs_alarm.ticks     = _CVBS_HTOTAL_US;
