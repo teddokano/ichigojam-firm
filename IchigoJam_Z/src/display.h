@@ -98,7 +98,15 @@ void _cvbs_line_cb(const struct device *dev, uint8_t chan,
         _delay = _CVBS_HTOTAL_US;
     }
     _cvbs_alarm.ticks = (uint32_t)_delay;
-    counter_set_channel_alarm(dev, chan, &_cvbs_alarm);
+    if (counter_set_channel_alarm(dev, chan, &_cvbs_alarm) == -ETIME) {
+        /* アラーム設定時に "missed"（対象時刻が過去）と判定された場合、
+         * driver が callback を NULL にして -ETIME を返すため、
+         * そのままでは ISR チェーンが断絶する。
+         * 次周期 (64µs後) から再同期して連鎖を維持する。       */
+        _cvbs_next_line_time = ticks + _CVBS_HTOTAL_US;
+        _cvbs_alarm.ticks   = _CVBS_HTOTAL_US;
+        counter_set_channel_alarm(dev, chan, &_cvbs_alarm);
+    }
 
     uint16_t ln = _cvbs_line;
     _cvbs_line = (ln + 1u < _CVBS_LINES) ? (uint16_t)(ln + 1u) : 0u;

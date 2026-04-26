@@ -67,8 +67,13 @@ static void _sound_timer_fn(void *a, void *b, void *c)
     while (1) {
         k_sleep(K_USEC(16666));
         psg_tick();
+#if !defined(CONFIG_SOC_SERIES_RP2040)
+        /* RP2040 では CVBS ライン ISR (_cvbs_line_cb) が
+         * frames / _g.linecnt を更新するため、ここでは行わない。
+         * 二重インクリメントすると TICK(0) が 2x 速になる。 */
         frames++;        // TICK(0) / video_waitSync frame counter
-        _g.linecnt++;    // WAIT -n frame counter
+        _g.linecnt++;    // TICK(1) / WAIT -n line counter
+#endif
         uint16_t tone = _g.psgtone;
         // Frequency formula from IchigoJam_P: freq = 60 * 261 / 2 / tone
         int freq = tone ? (7830 / (int)tone) : 0;
