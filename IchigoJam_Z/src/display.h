@@ -11,7 +11,7 @@
 //
 // 実装方針: Zephyr counter API で 64µs 周期のライン ISR を生成。
 //   1ライン = 64µs (NTSC 63.5µs に近似、60fps でテレビ同期可)
-//   261ライン/フレーム: vsync(12) + vblank(9) + active(192) + vblank(48)
+//   261ライン/フレーム: vsync(12) + vblank(21) + active(192) + vblank(36)
 //
 // アクティブライン ISR 内での映像出力:
 //   32 キャラクタ列 × 8ビット × ~125ns/ビット ≈ 1µs/キャラクタ = 32µs の映像ウィンドウ。
@@ -37,7 +37,7 @@
 
 /* ── NTSC タイミング定数 ────────────────────────────────────────── */
 #define _CVBS_LINES      261    /* 総ライン数 */
-#define _CVBS_ACT_FIRST  21     /* アクティブ開始ライン (vsync12 + vblank9) */
+#define _CVBS_ACT_FIRST  33     /* アクティブ開始ライン (vsync12 + vblank21): 9→21に増加で画像を下にシフト */
 #define _CVBS_ACT_LINES  192    /* アクティブライン数 (24行 × 8px) */
 #define _CVBS_HTOTAL_US  64     /* 1ライン周期 µs */
 #define _CVBS_HSYNC_US   4      /* 水平同期パルス幅 µs (IchigoJam_Q 実測 ~4µs) */
@@ -104,6 +104,13 @@ uint32_t _video_mask;   /* (1U << 17) for GPIO17 */
 volatile uint16_t _cvbs_line;
 struct counter_alarm_cfg _cvbs_alarm;
 bool _cvbs_on;
+/* フォントパターン SRAM コピー。
+ * XIP Flash (CHAR_PATTERN) はキャッシュミス時 ~80cy のペナルティがある。
+ * ISR が呼ばれるたびに BASIC インタープリタが 16KB XIP キャッシュを
+ * 入れ替えるため、スキャン行 0 でキャッシュミスが発生しやすく
+ * 他の行との間にピクセル位置ずれ (字形崩れ) を引き起こす。
+ * video_on() で SRAM にコピーして ISR 内の読み取りを確定的にする。       */
+static uint8_t _cvbs_font[256 * 8];
 /* 次ライン ISR の「本来の」絶対発火時刻 (µs, 1MHz カウンタ値)。
  * ISR が遅延した場合でも次のアラームを本来の時刻から計算することで
  * ジッタを1ライン内に閉じ込め、長期的な H-sync 周期を安定させる。 */
@@ -163,10 +170,14 @@ void _cvbs_line_cb(const struct device *dev, uint8_t chan,
     }
 
     /* ── 通常ライン: 水平同期 ───────────────────────────────────── */
+    /* TIMELR ベースで H-sync + バックポーチを待機。alarm は 1MHz タイマー
+     * 境界で発火するため ISR 開始時刻のライン間ばらつきは <128ns。
+     * WAIT_US(N) の誤差は同一 µs tick 内の数十 ns に収まり、
+     * 同一キャラクタの各スキャン行で水平位置が揃う。                    */
     _SIO_CLR = _sync_mask | _video_mask;       /* SYNC=L (hsync) */
     _CVBS_WAIT_US(_CVBS_HSYNC_US);
     _SIO_SET = _sync_mask;                     /* SYNC=H */
-    _CVBS_WAIT_US(_CVBS_BACK_US);             /* バックポーチ */
+    _CVBS_WAIT_US(_CVBS_BACK_US);
 
     if (ln >= _CVBS_ACT_FIRST && ln < (uint16_t)(_CVBS_ACT_FIRST + _CVBS_ACT_LINES)) {
         /* ── アクティブライン: 映像出力 ─────────────────────────── */
@@ -189,7 +200,7 @@ void _cvbs_line_cb(const struct device *dev, uint8_t chan,
             /* ch >= 0xE0: user PCG, ch < 0xE0: standard font */
             uint8_t pat = (ch >= _pcg_first)
                 ? screen_pcg[(ch - _pcg_first) * 8u + (uint8_t)sr]
-                : CHAR_PATTERN[ch * 8 + sr];
+                : _cvbs_font[ch * 8 + sr];  /* SRAM コピー: XIP キャッシュミス防止 */
 
             /* 8ビットを MSB 順にブランチレス出力。
              * _CVBS_PIXEL(p) は bit7 を出力し、`p <<= 1` で次ビットを MSB へ繰り上げる。
@@ -214,6 +225,12 @@ INLINE void video_on(void) {
     SCREEN_W = 32;
     SCREEN_H = 24;
     if (_cvbs_on) { return; }
+
+    /* CHAR_PATTERN (Flash/XIP) を SRAM にコピー。
+     * ISR 内での Flash 読み取りはキャッシュミス時 ~80cy かかるため
+     * スキャン行 0 だけピクセル位置がずれて字形が崩れる原因になる。
+     * SRAM コピーにより全スキャン行の読み取り時間を均一化する。         */
+    memcpy(_cvbs_font, CHAR_PATTERN, 256 * 8);
 
     gpio_pin_configure_dt(&_cvbs_sync,  GPIO_OUTPUT_LOW);
     gpio_pin_configure_dt(&_cvbs_video, GPIO_OUTPUT_LOW);
