@@ -41,7 +41,7 @@
 #define _CVBS_ACT_LINES  192    /* アクティブライン数 (24行 × 8px) */
 #define _CVBS_HTOTAL_US  64     /* 1ライン周期 µs */
 #define _CVBS_HSYNC_US   4      /* 水平同期パルス幅 µs (IchigoJam_Q 実測 ~4µs) */
-#define _CVBS_BACK_US    4      /* バックポーチ µs */
+#define _CVBS_BACK_US    8      /* バックポーチ µs (4µs では左寄りすぎるため 8µs に拡大) */
 #define _CVBS_VSYNC_US   58     /* 垂直同期ロングパルス µs (58/64=91% duty — vsync 積分器確実トリガ) */
 
 /* ── GPIO / counter バインディング ─────────────────────────────── */
@@ -74,17 +74,28 @@ const struct device *_cvbs_ctr;
     while ((int32_t)(_CVBS_TIMER_RAW - _t) < 0) {} \
 } while (0)
 
-/* ── RP2040 ピクセルビット出力 ──────────────────────────────────────
- * 1ビット ≈ 136-144ns。Cortex-M0+ で branch+SIO ≈ 5-6cy + NOP×11 = ~17cy × 8ns。
- * 8ビット × 17cy = 136cy ≈ 1.088µs/キャラクタ。32列 × 1.088µs ≈ 34.8µs の映像ウィンドウ。
+/* ── RP2040 ブランチレスピクセル出力 ──────────────────────────────
+ * 引数 p: 現在のビットを MSB (bit 7) に持つ uint8_t。
+ * 呼び出し元は `p = (uint8_t)(p << 1)` で次ビットをシフトする。
  *
- * TIMELR アンカー（1µs 粒度）は列幅を 0.6〜1.6µs にランダム変動させるため使わない。
- * branch taken/not-taken の 1cy 差は 256bit 積算で最大 ~2µs のドリフトだが
- * 水平方向の左端は常に一定で右端のみ ±1 文字幅ぶれる程度であり許容範囲。     */
-#define _CVBS_PIXEL(b) do { \
-    if (b) { _SIO_SET = _video_mask; } \
-    else   { _SIO_CLR = _video_mask; } \
-    __asm__ volatile("nop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\n"); \
+ * SIO の仕様: SET/CLR レジスタへの書き込み値 0 は無操作 (no-op)。
+ *   ビット=1 → _s = _video_mask,     SET=mask → VIDEO HIGH, CLR=0 (no-op)
+ *   ビット=0 → _s = 0,               SET=0 (no-op),         CLR=mask → VIDEO LOW
+ *
+ * ブランチレス化の理由:
+ *   if/else 条件分岐は Cortex-M0+ で branch-taken=3cy / not-taken=1cy。
+ *   1ビット当たり ±1cy のばらつきが 8bit × 32col = 256bit で累積すると
+ *   同じキャラクタの異なるスキャン行が異なる水平位置にずれ、文字形が崩れる。
+ *   ブランチレスにより全ビット均一 17cy ≈ 136ns → 8bit × 17cy = 1.088µs/char。
+ *
+ * 総映像ウィンドウ: 32col × 1.088µs ≈ 34.8µs。
+ * H-ライン内訳: 4µs HSYNC + 8µs back + 34.8µs active + 17.2µs front = 64µs。
+ * ZephyrにAPIがないため SIO/TIMELR 直叩きを使う (RP2040 限定)。              */
+#define _CVBS_PIXEL(p) do { \
+    uint32_t _s = (uint32_t)(-(int32_t)((uint8_t)(p) >> 7)) & _video_mask; \
+    _SIO_SET = _s; \
+    _SIO_CLR = _video_mask ^ _s; \
+    __asm__ volatile("nop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\n"); \
 } while (0)
 uint32_t _sync_mask;    /* (1U << 16) for GPIO16 */
 uint32_t _video_mask;   /* (1U << 17) for GPIO17 */
@@ -180,15 +191,18 @@ void _cvbs_line_cb(const struct device *dev, uint8_t chan,
                 ? screen_pcg[(ch - _pcg_first) * 8u + (uint8_t)sr]
                 : CHAR_PATTERN[ch * 8 + sr];
 
-            /* 8ビットをMSB順に個別出力。各ビット ~136-144ns、8ビット合計 ~1.088µs。 */
-            _CVBS_PIXEL(pat & 0x80u);
-            _CVBS_PIXEL(pat & 0x40u);
-            _CVBS_PIXEL(pat & 0x20u);
-            _CVBS_PIXEL(pat & 0x10u);
-            _CVBS_PIXEL(pat & 0x08u);
-            _CVBS_PIXEL(pat & 0x04u);
-            _CVBS_PIXEL(pat & 0x02u);
-            _CVBS_PIXEL(pat & 0x01u);
+            /* 8ビットを MSB 順にブランチレス出力。
+             * _CVBS_PIXEL(p) は bit7 を出力し、`p <<= 1` で次ビットを MSB へ繰り上げる。
+             * 全ビット均一 17cy = 136ns。8bit × 136ns = 1.088µs/char。          */
+            uint8_t _p = pat;
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p);
         }
         _SIO_CLR = _video_mask;                /* VIDEO=L (フロントポーチ) */
     }
