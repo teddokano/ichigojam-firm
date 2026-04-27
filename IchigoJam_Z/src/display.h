@@ -75,15 +75,16 @@ const struct device *_cvbs_ctr;
 } while (0)
 
 /* ── RP2040 ピクセルビット出力 ──────────────────────────────────────
- * 1ビット ≈ 70ns (branch+SIO ≈ 5cy + NOP×4 ≈ 4cy = ~9cy × 8ns)。
- * 8ビット合計 ~72cy ≈ 576ns < 1µs — TIMELR アンカーで列幅を 1µs に補完。
+ * 1ビット ≈ 136-144ns。Cortex-M0+ で branch+SIO ≈ 5-6cy + NOP×11 = ~17cy × 8ns。
+ * 8ビット × 17cy = 136cy ≈ 1.088µs/キャラクタ。32列 × 1.088µs ≈ 34.8µs の映像ウィンドウ。
  *
- * ブランチ taken/not-taken の 2cy 差は 256ビット積算で最大 ~4µs のドリフトを
- * 引き起こすため、列ごとに TIMELR でアンカーしてドリフトを 0 に吸収する。  */
+ * TIMELR アンカー（1µs 粒度）は列幅を 0.6〜1.6µs にランダム変動させるため使わない。
+ * branch taken/not-taken の 1cy 差は 256bit 積算で最大 ~2µs のドリフトだが
+ * 水平方向の左端は常に一定で右端のみ ±1 文字幅ぶれる程度であり許容範囲。     */
 #define _CVBS_PIXEL(b) do { \
     if (b) { _SIO_SET = _video_mask; } \
     else   { _SIO_CLR = _video_mask; } \
-    __asm__ volatile("nop\nnop\nnop\nnop\n"); \
+    __asm__ volatile("nop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\n"); \
 } while (0)
 uint32_t _sync_mask;    /* (1U << 16) for GPIO16 */
 uint32_t _video_mask;   /* (1U << 17) for GPIO17 */
@@ -164,15 +165,22 @@ void _cvbs_line_cb(const struct device *dev, uint8_t chan,
 
         const uint8_t *vrow = vram + cy * 32;
 
+        /* PCG の先頭コード: SIZE_PCG=32 なら 256-32=224=0xE0。
+         * IchigoJam は 0xE0-0xFF (= 32文字) をユーザー定義 PCG として使う。
+         * screen_clp() で CHAR_PATTERN[0xE0*8..] → screen_pcg にコピー済み。
+         * vram はゼロクリア (0x00=null) で初期化されるため、
+         * 0x00 を CHAR_PATTERN ではなく screen_pcg で引くと 0xE0 の字形 (非空白) が
+         * 表示されてしまう。0xE0 未満はすべて CHAR_PATTERN を参照すること。 */
+        const uint8_t _pcg_first = (uint8_t)(256u - (uint32_t)SIZE_PCG); /* 0xE0 */
+
         for (int col = 0; col < 32; col++) {
-            uint32_t _t0 = _CVBS_TIMER_RAW;   /* 列幅アンカー: この時点から 1µs で列終端 */
             uint8_t ch  = vrow[col];
-            /* PCG (コード 0-31) は screen_pcg、それ以外は CHAR_PATTERN */
-            uint8_t pat = (ch < SIZE_PCG)
-                ? screen_pcg[ch * 8 + sr]
+            /* ch >= 0xE0: user PCG, ch < 0xE0: standard font */
+            uint8_t pat = (ch >= _pcg_first)
+                ? screen_pcg[(ch - _pcg_first) * 8u + (uint8_t)sr]
                 : CHAR_PATTERN[ch * 8 + sr];
 
-            /* 8ビットをMSB順に個別出力 (~576ns < 1µs)。 */
+            /* 8ビットをMSB順に個別出力。各ビット ~136-144ns、8ビット合計 ~1.088µs。 */
             _CVBS_PIXEL(pat & 0x80u);
             _CVBS_PIXEL(pat & 0x40u);
             _CVBS_PIXEL(pat & 0x20u);
@@ -181,9 +189,6 @@ void _cvbs_line_cb(const struct device *dev, uint8_t chan,
             _CVBS_PIXEL(pat & 0x04u);
             _CVBS_PIXEL(pat & 0x02u);
             _CVBS_PIXEL(pat & 0x01u);
-
-            /* 列幅を TIMELR で正確に 1µs に固定。ブランチ timing 差の積算ドリフトを吸収。 */
-            while ((int32_t)(_CVBS_TIMER_RAW - _t0 - 1u) < 0) {}
         }
         _SIO_CLR = _video_mask;                /* VIDEO=L (フロントポーチ) */
     }
