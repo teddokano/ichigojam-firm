@@ -11,11 +11,11 @@
 //
 // 実装方針: Zephyr counter API で 64µs 周期のライン ISR を生成。
 //   1ライン = 64µs (NTSC 63.5µs に近似、60fps でテレビ同期可)
-//   261ライン/フレーム: vsync(1) + vblank(20) + active(192) + vblank(48)
+//   261ライン/フレーム: vsync(12) + vblank(9) + active(192) + vblank(48)
 //
 // アクティブライン ISR 内での映像出力:
-//   32 キャラクタ列 × k_busy_wait(1) = 32µs のファットピクセル出力。
-//   横幅は理想の 61% 程度だが文字の判読は可能。
+//   32 キャラクタ列 × 8ビット × ~125ns/ビット ≈ 1µs/キャラクタ = 32µs の映像ウィンドウ。
+//   各ビットを個別に VIDEO=H/L でドライブして文字を判読可能に描画する。
 //   BASIC インタープリタの CPU 占有率: ~45% (ブランク期間が主体)。
 //
 // RP2040 SIO レジスタを SYNC/VIDEO ピンの高速トグルに使用:
@@ -37,7 +37,7 @@
 
 /* ── NTSC タイミング定数 ────────────────────────────────────────── */
 #define _CVBS_LINES      261    /* 総ライン数 */
-#define _CVBS_ACT_FIRST  21     /* アクティブ開始ライン (vsync1 + vblank20) */
+#define _CVBS_ACT_FIRST  21     /* アクティブ開始ライン (vsync12 + vblank9) */
 #define _CVBS_ACT_LINES  192    /* アクティブライン数 (24行 × 8px) */
 #define _CVBS_HTOTAL_US  64     /* 1ライン周期 µs */
 #define _CVBS_HSYNC_US   4      /* 水平同期パルス幅 µs (IchigoJam_Q 実測 ~4µs) */
@@ -60,6 +60,31 @@ const struct device *_cvbs_ctr;
  * 対象: SIO_BASE=0xD0000000, GPIO_OUT_SET=+0x14, GPIO_OUT_CLR=+0x18 */
 #define _SIO_SET (*(volatile uint32_t *)0xD0000014U)
 #define _SIO_CLR (*(volatile uint32_t *)0xD0000018U)
+
+/* ── RP2040 タイマー直接待機 ────────────────────────────────────
+ * k_busy_wait() は sys_clock_cycle_get_32() のスピンロック+SysTick読み取り
+ * オーバーヘッド (~45 cycles ≈ 0.36µs/call) により k_busy_wait(1) が
+ * 実質 ~2µs になり、32列ピクセル出力で ISR が 64µs を超過する。
+ * TIMELR (0x4005400C) = 1MHz フリーランカウンタを直接読んで正確に待機。
+ * counter_rpi_pico_timer が内部で使うレジスタと同じであり読み取り専用で安全。
+ * ZephyrにAPIがないため直叩きを使う。                                   */
+#define _CVBS_TIMER_RAW (*(volatile uint32_t *)0x4005400CU) /* TIMER: TIMELR (1MHz) */
+#define _CVBS_WAIT_US(us) do { \
+    uint32_t _t = _CVBS_TIMER_RAW + (uint32_t)(us); \
+    while ((int32_t)(_CVBS_TIMER_RAW - _t) < 0) {} \
+} while (0)
+
+/* ── RP2040 ピクセルビット出力 ──────────────────────────────────────
+ * 1ビット ≈ 70ns (branch+SIO ≈ 5cy + NOP×4 ≈ 4cy = ~9cy × 8ns)。
+ * 8ビット合計 ~72cy ≈ 576ns < 1µs — TIMELR アンカーで列幅を 1µs に補完。
+ *
+ * ブランチ taken/not-taken の 2cy 差は 256ビット積算で最大 ~4µs のドリフトを
+ * 引き起こすため、列ごとに TIMELR でアンカーしてドリフトを 0 に吸収する。  */
+#define _CVBS_PIXEL(b) do { \
+    if (b) { _SIO_SET = _video_mask; } \
+    else   { _SIO_CLR = _video_mask; } \
+    __asm__ volatile("nop\nnop\nnop\nnop\n"); \
+} while (0)
 uint32_t _sync_mask;    /* (1U << 16) for GPIO16 */
 uint32_t _video_mask;   /* (1U << 17) for GPIO17 */
 
@@ -114,22 +139,22 @@ void _cvbs_line_cb(const struct device *dev, uint8_t chan,
     /* フレーム/ライン カウンタ更新 (TICK() / WAIT コマンドが参照) */
     _g.linecnt++;
 
-    if (ln == 0u) {
-        /* ── Vsync ライン: ロングパルス (1ライン) ───────────────── */
-        /* vsync を複数ライン連続すると TV の同期セパレータが         */
-        /* 複数回 vsync 検出し画面が乱れるため 1ライン のみ使用。    */
-        frames++;
+    if (ln < 12u) {
+        /* ── Vsync ライン: ロングパルス × 12ライン (IchigoJam_Q 仕様) ── */
+        /* 12ライン連続でロングパルスを出し積分器を確実にトリガする。      */
+        /* frames インクリメントは最初の 1ライン (ln==0) のみ。             */
+        if (ln == 0u) { frames++; }
         _SIO_CLR = _sync_mask | _video_mask;   /* SYNC=L, VIDEO=L */
-        k_busy_wait(_CVBS_VSYNC_US);
+        _CVBS_WAIT_US(_CVBS_VSYNC_US);
         _SIO_SET = _sync_mask;                 /* SYNC=H */
         return;
     }
 
     /* ── 通常ライン: 水平同期 ───────────────────────────────────── */
     _SIO_CLR = _sync_mask | _video_mask;       /* SYNC=L (hsync) */
-    k_busy_wait(_CVBS_HSYNC_US);
+    _CVBS_WAIT_US(_CVBS_HSYNC_US);
     _SIO_SET = _sync_mask;                     /* SYNC=H */
-    k_busy_wait(_CVBS_BACK_US);               /* バックポーチ */
+    _CVBS_WAIT_US(_CVBS_BACK_US);             /* バックポーチ */
 
     if (ln >= _CVBS_ACT_FIRST && ln < (uint16_t)(_CVBS_ACT_FIRST + _CVBS_ACT_LINES)) {
         /* ── アクティブライン: 映像出力 ─────────────────────────── */
@@ -140,21 +165,25 @@ void _cvbs_line_cb(const struct device *dev, uint8_t chan,
         const uint8_t *vrow = vram + cy * 32;
 
         for (int col = 0; col < 32; col++) {
+            uint32_t _t0 = _CVBS_TIMER_RAW;   /* 列幅アンカー: この時点から 1µs で列終端 */
             uint8_t ch  = vrow[col];
             /* PCG (コード 0-31) は screen_pcg、それ以外は CHAR_PATTERN */
             uint8_t pat = (ch < SIZE_PCG)
                 ? screen_pcg[ch * 8 + sr]
                 : CHAR_PATTERN[ch * 8 + sr];
 
-            /* ファットピクセル: スキャン行に 1 ビットでも立っていれば白。
-             * 1 列 = k_busy_wait(1) = 1µs。32 列で約 32µs の映像ウィンドウ。
-             * TV 上では横幅が理想の ~61% になるが文字は判読可能。         */
-            if (pat != 0u) {
-                _SIO_SET = _video_mask;        /* VIDEO=H (白) */
-            } else {
-                _SIO_CLR = _video_mask;        /* VIDEO=L (黒) */
-            }
-            k_busy_wait(1u);
+            /* 8ビットをMSB順に個別出力 (~576ns < 1µs)。 */
+            _CVBS_PIXEL(pat & 0x80u);
+            _CVBS_PIXEL(pat & 0x40u);
+            _CVBS_PIXEL(pat & 0x20u);
+            _CVBS_PIXEL(pat & 0x10u);
+            _CVBS_PIXEL(pat & 0x08u);
+            _CVBS_PIXEL(pat & 0x04u);
+            _CVBS_PIXEL(pat & 0x02u);
+            _CVBS_PIXEL(pat & 0x01u);
+
+            /* 列幅を TIMELR で正確に 1µs に固定。ブランチ timing 差の積算ドリフトを吸収。 */
+            while ((int32_t)(_CVBS_TIMER_RAW - _t0 - 1u) < 0) {}
         }
         _SIO_CLR = _video_mask;                /* VIDEO=L (フロントポーチ) */
     }

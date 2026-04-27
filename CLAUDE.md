@@ -16,9 +16,8 @@ IchigoJam BASIC を Zephyr RTOS 上で動かすプロジェクト。
 
 ## 現在の状態
 
-**M0〜M5 完了。Pico（rpi_pico）・FRDM-MCXA153・FRDM-MCXC444 の3ボードで実機動作確認済み。**
-**M6 実装中（display.h + overlay 完成、実機確認待ち）。**
-**作業ブランチ: `zephyr-m5`（M6 はここから継続）**
+**M0〜M6 完了。Pico（rpi_pico）で CVBS テレビ出力の実機動作確認済み。**
+**作業ブランチ: `zephyr-m5`（M7 はここから継続）**
 
 | | 内容 | 状態 |
 |---|---|---|
@@ -30,7 +29,7 @@ IchigoJam BASIC を Zephyr RTOS 上で動かすプロジェクト。
 | M5a | HALリファクタリング（overlay統一） | 完了 |
 | M5b | FRDM-MCXC444 ポート | 完了（実機確認済み） |
 | **M5** | **3ボード実機確認（ANA/SAVE/LOAD/PWM/I2C）** | **完了** |
-| **M6** | **CVBSビデオ出力（Pico先行）** | **実装完了・実機確認待ち** |
+| **M6** | **CVBSビデオ出力（Pico先行）** | **完了（実機確認済み）** |
 | M7 | FRDM-MCXC444 + CVBS | 未着手 |
 
 ---
@@ -210,7 +209,7 @@ RAMが8KB以下のボードへの移植時は `MEM_UNDER64KB` の定義を検討
 
 ## 実装スコープ
 
-### 完了（M0〜M5）
+### 完了（M0〜M6）
 - UART I/O（IRQ driven + msgq）
 - GPIO IN/OUT/LED/BTN/ANA（DTS overlay でボード非依存）
 - PWM / PSG音源（`BEEP`, `PLAY`）
@@ -218,9 +217,9 @@ RAMが8KB以下のボードへの移植時は `MEM_UNDER64KB` の定義を検討
 - I2C（`I2C()` コマンド）
 - `USR()` マシン語呼び出し
 - 3ボード実機確認（rpi_pico / frdm_mcxa153 / frdm_mcxc444）
+- CVBSビデオ出力（rpi_pico 実機確認済み）
 
-### 今後（M6〜M7）
-- M6: CVBSビデオ出力（Pico先行）
+### 今後（M7）
 - M7: FRDM-MCXC444 + CVBS
 
 ### スコープ外（恒久）
@@ -234,8 +233,8 @@ RAMが8KB以下のボードへの移植時は `MEM_UNDER64KB` の定義を検討
 ## ブランチ戦略
 
 ```
-zephyr-m5   ← 現在地（M5 完了・3ボード実機確認済み）
-zephyr-m6   ← M6 完了時にコミット（CVBSビデオ）
+zephyr-m5   ← 現在地（M6 完了・CVBS実機確認済み）
+zephyr-m7   ← M7 完了時にコミット（FRDM-MCXC444 + CVBS）
 ```
 
 **Claude Code は `main` へのマージを自律的に行ってはならない。**
@@ -366,7 +365,7 @@ west build -b frdm_mcxc444
 
 ---
 
-## M6: CVBSビデオ出力（実装完了・実機確認待ち）
+## M6: CVBSビデオ出力（完了・実機確認済み）
 
 ### 回路
 ```
@@ -384,45 +383,48 @@ GPIO17(VIDEO)── 100Ω ───┘
 
 ### タイミング（NTSC）
 - 1ライン = 64µs（63.5µsに近似）、261ライン/フレーム、≈59.9fps
-- フレーム構成: Vsync 3ライン + ブランク 19ライン + 有効 192ライン + ブランク 47ライン
+- フレーム構成: vsync(12) + vblank(9) + active(192) + vblank(48)
+  - vsync 12ライン = IchigoJam_Q 仕様（58/64µs = 91% duty ロングパルス）
 
 ### 実装（`src/display.h` + `boards/rpi_pico.overlay`）
 
 - `CONFIG_COUNTER=y` を `prj.conf` に追加
 - `chosen { ij-cvbs-timer = &timer; }` + GPIO16/17 を `rpi_pico.overlay` に追加
 - `display.h` にライン ISR `_cvbs_line_cb()` を実装
-  - 先頭で次ライン 64µs アラームを再スケジュール
+  - 先頭で次ライン 64µs アラームを再スケジュール（ジッタ補正付き）
   - `frames` / `_g.linecnt` インクリメント
-  - SIO 直叩きで SYNC パルス（5µs）+ バックポーチ（5µs）を生成
-  - アクティブライン: 32 キャラクタ列 × `k_busy_wait(1)` のファットピクセル出力
-    - 各列: `CHAR_PATTERN[ch*8+row]` の OR が true なら VIDEO=H（白）
-    - 横幅は理想の 61% 程度だが文字は判読可能
+  - SIO 直叩きで SYNC パルス（4µs）+ バックポーチ（4µs）を生成
+  - アクティブライン: 32 キャラクタ列 × 8ビット/列 × ~125ns/ビット
+    - 各ビットを VIDEO=H/L で出力し文字パターンを再現（判読可能）
+    - TIMELR アンカーで列幅を 1µs に固定（branch timing ドリフト吸収）
 
-### RP2040 SIO 直叩き（例外として許容）
+### RP2040 レジスタ直叩き（例外として許容）
 
 ```c
-/* Zephyr GPIO API (~200ns/call) は SYNC アサートのジッタが大きすぎる。
- * SIO SET/CLR は 1 ストア命令 = ~16ns で完了する。
- * Zephyr GPIO ドライバも内部で同じ SIO レジスタを使用しており整合性に問題なし。*/
-#define _SIO_SET (*(volatile uint32_t *)0xD0000014U)  /* GPIO_OUT_SET */
-#define _SIO_CLR (*(volatile uint32_t *)0xD0000018U)  /* GPIO_OUT_CLR */
+/* SIO SET/CLR: Zephyr GPIO API (~200ns/call) はジッタが大きすぎるため直叩き */
+#define _SIO_SET (*(volatile uint32_t *)0xD0000014U)
+#define _SIO_CLR (*(volatile uint32_t *)0xD0000018U)
+
+/* TIMELR: k_busy_wait() は ~0.36µs/call のオーバーヘッドで 64µs 予算を超過するため
+ * 1MHz フリーランカウンタを直接読んで正確に待機する */
+#define _CVBS_TIMER_RAW (*(volatile uint32_t *)0x4005400CU)
 ```
 
-`#if defined(CONFIG_SOC_SERIES_RP2040)` でスコープを閉じ、コメントを明記。
+いずれも `#if defined(CONFIG_SOC_SERIES_RP2040)` でスコープを閉じ、コメントを明記。
 
 ### counter_cancel_channel_alarm の正式名称
 
 `counter_cancel_alarm()` は存在しない。正しくは `counter_cancel_channel_alarm(dev, chan_id)`。
 
-### CPU 占有率（実測前の試算）
-- ブランクライン（69本/フレーム）: ISR ≈ 12µs、BASIC 52µs（81% フリー）
-- アクティブライン（192本/フレーム）: ISR ≈ 44µs、BASIC 20µs（31% フリー）
-- 加重平均: BASIC 約 45% CPU → M0〜M5 と同等の実行速度を維持
+### -ETIME チェーン断絶防止
 
-### 実機確認ステップ
-1. UF2 を Pico に書き込み、GPIO16/17 に回路を接続してテレビに繋ぐ
-2. オシロで GPIO16（SYNC）の 64µs 周期と 5µs パルス幅を確認
-3. テレビに起動ロゴ・BASIC プロンプトが表示されることを確認
+`counter_set_channel_alarm()` が `-ETIME` を返した場合、driver が callback を NULL に
+クリアして ISR チェーンが断絶する。必ず戻り値を確認してリカバリすること（実装済み）。
+
+### 実機確認済み（Toshiba テレビ）
+- H-sync: 15.625 kHz ✓
+- V-sync: 安定（ローリングなし）✓
+- 映像: 「IchigoJam BASIC x.x.x by jig.jp」「OK」が画面上部に表示 ✓
 
 ---
 
