@@ -110,17 +110,20 @@
 /*
  * CVBS タイマー (RP2040 hardware timer alarm0)
  *
- * alarm0 の IRQ 優先度を 1 に設定し、Zephyr システムクロック
- * (SysTick / alarm3、優先度 3) が CVBS ISR を割り込めないようにする。
- * これにより H-sync 周期のジッタ（±2µs / 15ライン毎）を排除する。
+ * alarm0 の IRQ 優先度を 0 (最高) に設定する。
+ * Cortex-M0+ は 2-bit 優先度 (0=最高, 3=最低)。
+ * 優先度 0 により Zephyr カーネル tick (SysTick/alarm3 = 優先度 3) を含む
+ * 全ての割り込みが CVBS ISR を割り込めなくなり、H-sync 周期が安定する。
+ * RP2040 は BASEPRI 非搭載のため CONFIG_ZERO_LATENCY_IRQS は無効であり、
+ * 優先度 0 でも Zephyr API (counter_set_channel_alarm 等) を安全に呼べる。
  *
  * 優先度マッピング (Cortex-M0+ 2bit: 0=最高 … 3=最低):
- *   alarm0: 1 (CVBS 専用 — SysTick/alarm3 より高優先度)
+ *   alarm0: 0 (CVBS 専用 — 最高優先度)
  *   alarm1-3: 3 (デフォルト)
  */
 &timer {
 	status = "okay";
-	interrupts = <0 1>,  /* alarm0: CVBS — 高優先度 */
+	interrupts = <0 0>,  /* alarm0: CVBS — 最高優先度 */
 		     <1 3>,
 		     <2 3>,
 		     <3 3>;

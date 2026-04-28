@@ -73,6 +73,12 @@ const struct device *_cvbs_ctr;
     uint32_t _t = _CVBS_TIMER_RAW + (uint32_t)(us); \
     while ((int32_t)(_CVBS_TIMER_RAW - _t) < 0) {} \
 } while (0)
+/* 絶対時刻待機: t = ticks + オフセット で指定する。
+ * ISR 内の可変オーバーヘッドに依らずピクセル開始時刻を ticks 基準に固定。
+ * signed 比較で uint32_t のラップアラウンドを正しく処理する。            */
+#define _CVBS_WAIT_UNTIL(t) do { \
+    while ((int32_t)(_CVBS_TIMER_RAW - (uint32_t)(t)) < 0) {} \
+} while (0)
 
 /* ── RP2040 ブランチレスピクセル出力 ──────────────────────────────
  * 引数 p: 現在のビットを MSB (bit 7) に持つ uint8_t。
@@ -117,36 +123,43 @@ static uint8_t _cvbs_font[256 * 8];
 volatile uint32_t _cvbs_next_line_time;
 
 /* ── ライン ISR ─────────────────────────────────────────────────
- * counter alarm callback。ISR 先頭で次ラインのアラームを再スケジュール
- * してから SYNC / 映像出力を行う。
+ * counter alarm callback。
  *
- * ジッタ補正: _cvbs_next_line_time (絶対時刻) を基準に次の alarm を
- * 設定することで、ISR 遅延を 1ライン内に閉じ込め H-sync 周期を安定化。
- * alarm0 IRQ 優先度 = 1 (overlay で設定) により SysTick (優先度 3) が
- * 本 ISR を割り込めず、ジッタの主因を根本から除去している。           */
+ * タイミング設計:
+ *   SYNC=L を ISR の最初の1命令でアサートし、その後の全処理
+ *   (alarm 再スケジュール、カウンタ更新 = 可変オーバーヘッド) を
+ *   SYNC パルス中 (~4µs = 500cy) に収める。
+ *   ピクセル開始は _CVBS_WAIT_UNTIL(ticks + 12) で絶対時刻指定するため、
+ *   counter_set_channel_alarm() の XIP キャッシュミス等による
+ *   50〜300cy のオーバーヘッドがピクセル位置に影響しない。
+ *
+ *   ticks = alarm 発火時の TIMELR 値 (1µs 境界)。全スキャンラインで
+ *   ピクセル開始 = ticks + 12µs に固定 → 字形ジッタ解消。
+ *
+ *   alarm0 IRQ 優先度 = 0 (最高、overlay で設定) により
+ *   Zephyr カーネル tick (SysTick/優先度3) が割り込めない。            */
 void _cvbs_line_cb(const struct device *dev, uint8_t chan,
                    uint32_t ticks, void *user_data)
 {
     ARG_UNUSED(user_data);
 
-    /* ── 次ライン アラームをジッタ補正付きでスケジュール ────────────
-     * ticks = このコールバックが呼ばれた時点の現在時刻 (µs)。
-     * _cvbs_next_line_time は「本来の」絶対発火時刻を保持する。
-     * ISR が遅延していても次は本来の時刻から 64µs 後に発火させることで
-     * H-sync 周期のジッタを 1ライン内に吸収し長期安定性を保つ。        */
+    /* ── ① ISR 先頭で即座に SYNC=L ──────────────────────────────────
+     * alarm 発火から最短経路でアサート。以降の全タイミングを
+     * ticks (alarm 発火の 1µs 境界値) 基準にする。                    */
+    _SIO_CLR = _sync_mask | _video_mask;           /* SYNC=L, VIDEO=L */
+
+    /* ── ② 次ライン alarm をジッタ補正付きでスケジュール ──────────────
+     * SYNC パルス中 (~4µs) に実行するためピクセル開始に影響しない。
+     * -ETIME: driver が callback を NULL にして ISR チェーンが断絶する。
+     * 必ず戻り値を確認してリカバリする。                               */
     _cvbs_next_line_time += _CVBS_HTOTAL_US;
     int32_t _delay = (int32_t)(_cvbs_next_line_time - ticks);
     if (_delay <= 0) {
-        /* 大きな遅延 (複数ライン分) が発生した場合は次周期から再同期 */
         _cvbs_next_line_time = ticks + _CVBS_HTOTAL_US;
         _delay = _CVBS_HTOTAL_US;
     }
     _cvbs_alarm.ticks = (uint32_t)_delay;
     if (counter_set_channel_alarm(dev, chan, &_cvbs_alarm) == -ETIME) {
-        /* アラーム設定時に "missed"（対象時刻が過去）と判定された場合、
-         * driver が callback を NULL にして -ETIME を返すため、
-         * そのままでは ISR チェーンが断絶する。
-         * 次周期 (64µs後) から再同期して連鎖を維持する。       */
         _cvbs_next_line_time = ticks + _CVBS_HTOTAL_US;
         _cvbs_alarm.ticks   = _CVBS_HTOTAL_US;
         counter_set_channel_alarm(dev, chan, &_cvbs_alarm);
@@ -154,30 +167,24 @@ void _cvbs_line_cb(const struct device *dev, uint8_t chan,
 
     uint16_t ln = _cvbs_line;
     _cvbs_line = (ln + 1u < _CVBS_LINES) ? (uint16_t)(ln + 1u) : 0u;
-
-    /* フレーム/ライン カウンタ更新 (TICK() / WAIT コマンドが参照) */
-    _g.linecnt++;
+    _g.linecnt++;  /* TICK(1)/WAIT -n 用ラインカウンタ */
 
     if (ln < 12u) {
-        /* ── Vsync ライン: ロングパルス × 12ライン (IchigoJam_Q 仕様) ── */
-        /* 12ライン連続でロングパルスを出し積分器を確実にトリガする。      */
-        /* frames インクリメントは最初の 1ライン (ln==0) のみ。             */
+        /* ── Vsync ライン: ロングパルス × 12ライン ─────────────────── */
         if (ln == 0u) { frames++; }
-        _SIO_CLR = _sync_mask | _video_mask;   /* SYNC=L, VIDEO=L */
-        _CVBS_WAIT_US(_CVBS_VSYNC_US);
-        _SIO_SET = _sync_mask;                 /* SYNC=H */
+        /* SYNC=L 済み。ticks+58µs まで絶対待機して SYNC=H。           */
+        _CVBS_WAIT_UNTIL(ticks + _CVBS_VSYNC_US);
+        _SIO_SET = _sync_mask;                     /* SYNC=H */
         return;
     }
 
-    /* ── 通常ライン: 水平同期 ───────────────────────────────────── */
-    /* TIMELR ベースで H-sync + バックポーチを待機。alarm は 1MHz タイマー
-     * 境界で発火するため ISR 開始時刻のライン間ばらつきは <128ns。
-     * WAIT_US(N) の誤差は同一 µs tick 内の数十 ns に収まり、
-     * 同一キャラクタの各スキャン行で水平位置が揃う。                    */
-    _SIO_CLR = _sync_mask | _video_mask;       /* SYNC=L (hsync) */
-    _CVBS_WAIT_US(_CVBS_HSYNC_US);
-    _SIO_SET = _sync_mask;                     /* SYNC=H */
-    _CVBS_WAIT_US(_CVBS_BACK_US);
+    /* ── ③ 通常ライン: ticks 基準の絶対待機でピクセル開始位置を固定 ───
+     * _CVBS_WAIT_UNTIL(ticks + N) は alarm 発火時刻からの絶対オフセット。
+     * ISR 内のオーバーヘッドが何 µs かかっても、ピクセル出力は常に
+     * ticks + 12µs から始まるため全スキャンライン間で水平位置が一致する。*/
+    _CVBS_WAIT_UNTIL(ticks + _CVBS_HSYNC_US);              /* 4µs: SYNC=H */
+    _SIO_SET = _sync_mask;                                  /* SYNC=H */
+    _CVBS_WAIT_UNTIL(ticks + _CVBS_HSYNC_US + _CVBS_BACK_US); /* 12µs: pixel start */
 
     if (ln >= _CVBS_ACT_FIRST && ln < (uint16_t)(_CVBS_ACT_FIRST + _CVBS_ACT_LINES)) {
         /* ── アクティブライン: 映像出力 ─────────────────────────── */
