@@ -133,9 +133,10 @@ volatile uint32_t _cvbs_next_line_time;
  *   counter_set_channel_alarm() の XIP キャッシュミス等による
  *   50〜300cy のオーバーヘッドがピクセル位置に影響しない。
  *
- *   alarm は COUNTER_ALARM_CFG_ABSOLUTE で設定するため、発火時刻は
- *   ISR の overhead に依らず _cvbs_next_line_time (64µs 刻み固定) に
- *   直結する → H-sync 周期安定 + ピクセル開始 = ticks+12µs 固定。
+ *   alarm 再スケジュール: counter_set_channel_alarm 直前に TIMELR を読み
+ *   相対 delay = _cvbs_next_line_time - TIMELR_now を計算する。
+ *   alarm_fire ≈ _cvbs_next_line_time + 定数Δ (Δ=call overhead≈200ns)
+ *   → H-sync 周期 ≈ 64µs。ピクセル開始は ticks+12µs で固定。
  *
  *   alarm0 IRQ 優先度 = 0 (最高、overlay で設定) により
  *   Zephyr カーネル tick (SysTick/優先度3) が割り込めない。            */
@@ -149,21 +150,30 @@ void _cvbs_line_cb(const struct device *dev, uint8_t chan,
      * ticks (alarm 発火の 1µs 境界値) 基準にする。                    */
     _SIO_CLR = _sync_mask | _video_mask;           /* SYNC=L, VIDEO=L */
 
-    /* ── ② 次ライン alarm を絶対時刻でスケジュール ────────────────────
-     * COUNTER_ALARM_CFG_ABSOLUTE: ticks = 発火させたい TIMELR 絶対値。
-     * 相対アラームでは「counter_set_channel_alarm 呼び出し時点の TIMELR +
-     * delay」が発火時刻になるため、ISR overhead (~0.5〜2µs) が周期誤差に
-     * なり H-sync 周波数が不安定になる。
-     * 絶対アラームでは _cvbs_next_line_time (= 前回発火 + 64) が発火時刻に
-     * 直結するため、overhead に依らず常に 64µs 周期が保たれる。
+    /* ── ② 次ライン alarm をスケジュール ─────────────────────────────
+     * RP2040 Zephyr counter driver の COUNTER_ALARM_CFG_ABSOLUTE は
+     * driver バグ (target=0 → alarm_at=now → 常に -ETIME) のため使用不可。
+     * 相対アラームで「直前の TIMELR 読み取り」を使って差分を計算する:
+     *   _ticks = _cvbs_next_line_time - _now  (相対 delay)
+     *   alarm_fire = driver_now + _ticks
+     *              ≈ (_now + Δ) + (_cvbs_next_line_time - _now)
+     *              = _cvbs_next_line_time + Δ   (Δ = call overhead、定数)
+     * Δ は毎ライン同じ経路を通るため定数 → H-sync 周期が安定する。
      * -ETIME: driver が callback を NULL にして ISR チェーンが断絶する。
      * 必ず戻り値を確認してリカバリする。                               */
     _cvbs_next_line_time += _CVBS_HTOTAL_US;
-    _cvbs_alarm.ticks = _cvbs_next_line_time;          /* 絶対発火時刻 */
+    uint32_t _now = _CVBS_TIMER_RAW;          /* counter_set直前にTIMELR読取 */
+    int32_t _ticks = (int32_t)(_cvbs_next_line_time - _now);
+    if (_ticks <= 0) {
+        _now = _CVBS_TIMER_RAW;
+        _cvbs_next_line_time = _now + _CVBS_HTOTAL_US;
+        _ticks = _CVBS_HTOTAL_US;
+    }
+    _cvbs_alarm.ticks = (uint32_t)_ticks;
     if (counter_set_channel_alarm(dev, chan, &_cvbs_alarm) == -ETIME) {
-        /* 絶対時刻が過去: ticks の次の境界から再同期 */
-        _cvbs_next_line_time = ticks + _CVBS_HTOTAL_US;
-        _cvbs_alarm.ticks   = _cvbs_next_line_time;
+        _now = _CVBS_TIMER_RAW;
+        _cvbs_next_line_time = _now + _CVBS_HTOTAL_US;
+        _cvbs_alarm.ticks   = _CVBS_HTOTAL_US;
         counter_set_channel_alarm(dev, chan, &_cvbs_alarm);
     }
 
@@ -256,8 +266,8 @@ INLINE void video_on(void) {
     _cvbs_next_line_time = _t0 + _CVBS_HTOTAL_US;
 
     _cvbs_alarm.callback  = _cvbs_line_cb;
-    _cvbs_alarm.ticks     = _cvbs_next_line_time;       /* 絶対発火時刻 */
-    _cvbs_alarm.flags     = COUNTER_ALARM_CFG_ABSOLUTE; /* H-sync 周期を安定化 */
+    _cvbs_alarm.ticks     = _CVBS_HTOTAL_US;  /* 相対: 初回のみ使用 */
+    _cvbs_alarm.flags     = 0u;               /* 相対モード (ABSOLUTEはdriverバグのため使用不可) */
     _cvbs_alarm.user_data = NULL;
 
     counter_start(_cvbs_ctr);
