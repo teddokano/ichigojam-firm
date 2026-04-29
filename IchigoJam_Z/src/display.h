@@ -133,8 +133,9 @@ volatile uint32_t _cvbs_next_line_time;
  *   counter_set_channel_alarm() の XIP キャッシュミス等による
  *   50〜300cy のオーバーヘッドがピクセル位置に影響しない。
  *
- *   ticks = alarm 発火時の TIMELR 値 (1µs 境界)。全スキャンラインで
- *   ピクセル開始 = ticks + 12µs に固定 → 字形ジッタ解消。
+ *   alarm は COUNTER_ALARM_CFG_ABSOLUTE で設定するため、発火時刻は
+ *   ISR の overhead に依らず _cvbs_next_line_time (64µs 刻み固定) に
+ *   直結する → H-sync 周期安定 + ピクセル開始 = ticks+12µs 固定。
  *
  *   alarm0 IRQ 優先度 = 0 (最高、overlay で設定) により
  *   Zephyr カーネル tick (SysTick/優先度3) が割り込めない。            */
@@ -148,20 +149,21 @@ void _cvbs_line_cb(const struct device *dev, uint8_t chan,
      * ticks (alarm 発火の 1µs 境界値) 基準にする。                    */
     _SIO_CLR = _sync_mask | _video_mask;           /* SYNC=L, VIDEO=L */
 
-    /* ── ② 次ライン alarm をジッタ補正付きでスケジュール ──────────────
-     * SYNC パルス中 (~4µs) に実行するためピクセル開始に影響しない。
+    /* ── ② 次ライン alarm を絶対時刻でスケジュール ────────────────────
+     * COUNTER_ALARM_CFG_ABSOLUTE: ticks = 発火させたい TIMELR 絶対値。
+     * 相対アラームでは「counter_set_channel_alarm 呼び出し時点の TIMELR +
+     * delay」が発火時刻になるため、ISR overhead (~0.5〜2µs) が周期誤差に
+     * なり H-sync 周波数が不安定になる。
+     * 絶対アラームでは _cvbs_next_line_time (= 前回発火 + 64) が発火時刻に
+     * 直結するため、overhead に依らず常に 64µs 周期が保たれる。
      * -ETIME: driver が callback を NULL にして ISR チェーンが断絶する。
      * 必ず戻り値を確認してリカバリする。                               */
     _cvbs_next_line_time += _CVBS_HTOTAL_US;
-    int32_t _delay = (int32_t)(_cvbs_next_line_time - ticks);
-    if (_delay <= 0) {
-        _cvbs_next_line_time = ticks + _CVBS_HTOTAL_US;
-        _delay = _CVBS_HTOTAL_US;
-    }
-    _cvbs_alarm.ticks = (uint32_t)_delay;
+    _cvbs_alarm.ticks = _cvbs_next_line_time;          /* 絶対発火時刻 */
     if (counter_set_channel_alarm(dev, chan, &_cvbs_alarm) == -ETIME) {
+        /* 絶対時刻が過去: ticks の次の境界から再同期 */
         _cvbs_next_line_time = ticks + _CVBS_HTOTAL_US;
-        _cvbs_alarm.ticks   = _CVBS_HTOTAL_US;
+        _cvbs_alarm.ticks   = _cvbs_next_line_time;
         counter_set_channel_alarm(dev, chan, &_cvbs_alarm);
     }
 
@@ -254,8 +256,8 @@ INLINE void video_on(void) {
     _cvbs_next_line_time = _t0 + _CVBS_HTOTAL_US;
 
     _cvbs_alarm.callback  = _cvbs_line_cb;
-    _cvbs_alarm.ticks     = _CVBS_HTOTAL_US;
-    _cvbs_alarm.flags     = 0u;
+    _cvbs_alarm.ticks     = _cvbs_next_line_time;       /* 絶対発火時刻 */
+    _cvbs_alarm.flags     = COUNTER_ALARM_CFG_ABSOLUTE; /* H-sync 周期を安定化 */
     _cvbs_alarm.user_data = NULL;
 
     counter_start(_cvbs_ctr);
