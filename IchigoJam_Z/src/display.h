@@ -1,52 +1,55 @@
-// IchigoJam_Z - CVBS video output (M6)
+// IchigoJam_Z - CVBS video output (M6/M7)
+// IchigoJam_Z - CVBS video output (M6/M7)
 //
-// Circuit (Raspberry Pi Pico):
-//   GPIO16 (SYNC)  ── 470Ω ──┬── CVBS出力 (75Ω終端テレビへ)
-//   GPIO17 (VIDEO) ── 100Ω ──┘
+// 共通回路:
+//   SYNC ─── 470Ω ──┬── CVBS出力 (75Ω終端テレビへ)
+//   VIDEO─── 100Ω ──┘
 //
 // 信号レベル:
 //   SYNC=L, VIDEO=L → 0V       (同期チップ)
 //   SYNC=H, VIDEO=L → ~0.38V   (ブランク/黒)
 //   SYNC=H, VIDEO=H → ~0.97V   (白)
 //
-// 実装方針: Zephyr counter API で 64µs 周期のライン ISR を生成。
-//   1ライン = 64µs (NTSC 63.5µs に近似、60fps でテレビ同期可)
-//   261ライン/フレーム: vsync(12) + vblank(21) + active(192) + vblank(36)
+// RP2040 (Pico):  M6 — GPIO16(SYNC) / GPIO17(VIDEO) / alarm0 (1MHz)
+// MCXA153 (FRDM): M7 — P3_14/D9(SYNC) / P3_15/D8(VIDEO) / CTimer1 (1MHz)
 //
-// アクティブライン ISR 内での映像出力:
-//   32 キャラクタ列 × 8ビット × ~125ns/ビット ≈ 1µs/キャラクタ = 32µs の映像ウィンドウ。
-//   各ビットを個別に VIDEO=H/L でドライブして文字を判読可能に描画する。
-//   BASIC インタープリタの CPU 占有率: ~45% (ブランク期間が主体)。
+// ISR 方式:
+//   RP2040:   Zephyr counter alarm callback で 64µs 周期ライン ISR を生成。
+//             ALARM0 直接書き込みで H-sync 周期を安定化。
+//   MCXA153:  irq_connect_dynamic() で CTimer1 ISR を直接登録。
+//             Zephyr counter driver preamble (~50-200cy 変動) をバイパスし、
+//             alarm 発火から固定遅延 (IRQ latency + wrapper ~0.33µs) で
+//             SYNC=L を出力 → H-sync ジッタを排除。
 //
-// RP2040 SIO レジスタを SYNC/VIDEO ピンの高速トグルに使用:
-//   Zephyr GPIO API (~200ns/call) は 1µs ファットピクセルには十分だが、
-//   ISR 先頭での SYNC アサートは SIO 直叩きで遅延を最小化する。
-//   SIO は Zephyr GPIO driver が内部で使うレジスタと同じであり安全。
+// 1ライン = 64µs (NTSC 63.5µs 近似)、261ライン/フレーム、≈60fps。
+// フレーム構成: vsync(12) + vblank(21) + active(192) + vblank(36)。
 //
-// 非 RP2040 ボード: #if CONFIG_SOC_SERIES_RP2040 で全ブロックをガード。
-//   frdm_mcxa153 / frdm_mcxc444 では video_on() は画面サイズ設定のみ。
+// 非対応ボード: #if で全ブロックをガード。スタブ実装を提供。
 
 #ifndef __DISPLAY_H__
 #define __DISPLAY_H__
 
 #include <zephyr/kernel.h>
 
-#if defined(CONFIG_SOC_SERIES_RP2040)
+#if defined(CONFIG_SOC_SERIES_RP2040) || defined(CONFIG_SOC_SERIES_MCXA1X3)
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/counter.h>
+#include <zephyr/irq.h>
 
-/* ── NTSC タイミング定数 ────────────────────────────────────────── */
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * ── 共通 NTSC タイミング定数 ─────────────────────────────────────────── */
 #define _CVBS_LINES      261    /* 総ライン数 */
-#define _CVBS_ACT_FIRST  33     /* アクティブ開始ライン (vsync12 + vblank21): 9→21に増加で画像を下にシフト */
+#define _CVBS_ACT_FIRST   33    /* アクティブ開始ライン (vsync12 + vblank21) */
 #define _CVBS_ACT_LINES  192    /* アクティブライン数 (24行 × 8px) */
-#define _CVBS_HTOTAL_US  64     /* 1ライン周期 µs */
-#define _CVBS_HSYNC_US   4      /* 水平同期パルス幅 µs (IchigoJam_Q 実測 ~4µs) */
-#define _CVBS_BACK_US    8      /* バックポーチ µs (4µs では左寄りすぎるため 8µs に拡大) */
-#define _CVBS_VSYNC_US   58     /* 垂直同期ロングパルス µs (58/64=91% duty — vsync 積分器確実トリガ) */
+#define _CVBS_HTOTAL_US   64    /* 1ライン周期 µs */
+#define _CVBS_HSYNC_US     4    /* 水平同期パルス幅 µs */
+#define _CVBS_BACK_US      8    /* バックポーチ µs */
+#define _CVBS_VSYNC_US    58    /* 垂直同期ロングパルス µs (58/64 = 91% duty) */
 
-/* ── GPIO / counter バインディング ─────────────────────────────── */
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * ── 共通 GPIO / counter DTS バインディング ───────────────────────────── */
 /* static を付けない: INLINE が non-static inline に展開される場合に
- * "static variable used in non-static inline function" warning が出るため。
+ * "static variable used in non-static inline function" 警告が出るため。
  * display.h は単一 TU にのみ include されるので多重定義の心配はない。  */
 const struct gpio_dt_spec _cvbs_sync =
     GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), ij_cvbs_sync_gpios);
@@ -54,176 +57,238 @@ const struct gpio_dt_spec _cvbs_video =
     GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), ij_cvbs_video_gpios);
 const struct device *_cvbs_ctr;
 
-/* ── RP2040 SIO 直接アクセス ────────────────────────────────────
- * SYNC ISR 先頭での遅延を最小化するため SIO SET/CLR レジスタを直叩き。
- * Zephyr GPIO API の内部でも同じ SIO を使用しており整合性に問題ない。
- * 対象: SIO_BASE=0xD0000000, GPIO_OUT_SET=+0x14, GPIO_OUT_CLR=+0x18 */
-#define _SIO_SET (*(volatile uint32_t *)0xD0000014U)
-#define _SIO_CLR (*(volatile uint32_t *)0xD0000018U)
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * ── プラットフォーム固有レジスタ定義 ─────────────────────────────────── */
 
-/* ── RP2040 タイマー直接待機 ────────────────────────────────────
- * k_busy_wait() は sys_clock_cycle_get_32() のスピンロック+SysTick読み取り
- * オーバーヘッド (~45 cycles ≈ 0.36µs/call) により k_busy_wait(1) が
- * 実質 ~2µs になり、32列ピクセル出力で ISR が 64µs を超過する。
- * TIMELR (0x4005400C) = 1MHz フリーランカウンタを直接読んで正確に待機。
- * counter_rpi_pico_timer が内部で使うレジスタと同じであり読み取り専用で安全。
- * ZephyrにAPIがないため直叩きを使う。                                   */
-#define _CVBS_TIMER_RAW (*(volatile uint32_t *)0x4005400CU) /* TIMER: TIMELR (1MHz) */
-#define _CVBS_WAIT_US(us) do { \
-    uint32_t _t = _CVBS_TIMER_RAW + (uint32_t)(us); \
-    while ((int32_t)(_CVBS_TIMER_RAW - _t) < 0) {} \
-} while (0)
-/* 絶対時刻待機: t = ticks + オフセット で指定する。
- * ISR 内の可変オーバーヘッドに依らずピクセル開始時刻を ticks 基準に固定。
- * signed 比較で uint32_t のラップアラウンドを正しく処理する。            */
-#define _CVBS_WAIT_UNTIL(t) do { \
-    while ((int32_t)(_CVBS_TIMER_RAW - (uint32_t)(t)) < 0) {} \
-} while (0)
+#if defined(CONFIG_SOC_SERIES_RP2040)
+/* RP2040: SIO SET/CLR (高速 GPIO)、TIMELR (1MHz カウンタ)、ALARM0/ARMED
+ *
+ * SIO (0xD0000000):
+ *   GPIO_OUT_SET +0x14 = 0xD0000014  ← Zephyr GPIO driver が内部使用、安全
+ *   GPIO_OUT_CLR +0x18 = 0xD0000018
+ *
+ * TIMER (0x40054000):
+ *   TIMELR  +0x0C = 0x4005400C  1MHz フリーランカウンタ下位32bit (RO)
+ *   ALARM0  +0x10 = 0x40054010  アラーム0比較値 (書き込みでアーム)
+ *   ARMED   +0x20 = 0x40054020  bit0: アーム中=1 / 発火済み=0 (RO)
+ *
+ * H-sync 周期安定化:
+ *   counter_set_channel_alarm() は内部で TIMELR を読むが、
+ *   XIP キャッシュミスで ±数百 cy 変動し H-sync 周期が不安定になる。
+ *   callback 登録は Zephyr API で行い、実際の発火時刻は
+ *   ALARM0 を直接書いて正確に制御する。
+ * ZephyrにAPIがないため直叩きを使う (RP2040 限定)。                    */
+#define _CVBS_HW_SET(m)       do { (*(volatile uint32_t *)0xD0000014U) = (m); } while (0)
+#define _CVBS_HW_CLR(m)       do { (*(volatile uint32_t *)0xD0000018U) = (m); } while (0)
+#define _CVBS_TIMER_TC        (*(volatile uint32_t *)0x4005400CU)
+#define _CVBS_ALARM0_REG      (*(volatile uint32_t *)0x40054010U)
+#define _CVBS_TIMER_ARMED     (*(volatile uint32_t *)0x40054020U)
 
-/* ── RP2040 ブランチレスピクセル出力 ──────────────────────────────
- * 引数 p: 現在のビットを MSB (bit 7) に持つ uint8_t。
- * 呼び出し元は `p = (uint8_t)(p << 1)` で次ビットをシフトする。
- *
- * SIO の仕様: SET/CLR レジスタへの書き込み値 0 は無操作 (no-op)。
- *   ビット=1 → _s = _video_mask,     SET=mask → VIDEO HIGH, CLR=0 (no-op)
- *   ビット=0 → _s = 0,               SET=0 (no-op),         CLR=mask → VIDEO LOW
- *
- * ブランチレス化の理由:
- *   if/else 条件分岐は Cortex-M0+ で branch-taken=3cy / not-taken=1cy。
- *   1ビット当たり ±1cy のばらつきが 8bit × 32col = 256bit で累積すると
- *   同じキャラクタの異なるスキャン行が異なる水平位置にずれ、文字形が崩れる。
- *   ブランチレスにより全ビット均一 17cy ≈ 136ns → 8bit × 17cy = 1.088µs/char。
- *
- * 総映像ウィンドウ: 32col × 1.088µs ≈ 34.8µs。
- * H-ライン内訳: 4µs HSYNC + 8µs back + 34.8µs active + 17.2µs front = 64µs。
- * ZephyrにAPIがないため SIO/TIMELR 直叩きを使う (RP2040 限定)。              */
+/* ブランチレスピクセル出力 (RP2040)
+ * SIO CLR=0 は no-op。全ビット均一 ~17cy ≈ 136ns @ 125MHz。
+ * 10 NOPs: 8bit × 17cy = 1.088µs/char, 32col = ~34.8µs アクティブ。
+ * ブランチレス理由: Cortex-M0+ branch-taken=3cy / not-taken=1cy
+ *   → 1ビット ±1cy のばらつきが 256bit で累積し文字形が崩れる。        */
 #define _CVBS_PIXEL(p) do { \
     uint32_t _s = (uint32_t)(-(int32_t)((uint8_t)(p) >> 7)) & _video_mask; \
-    _SIO_SET = _s; \
-    _SIO_CLR = _video_mask ^ _s; \
-    __asm__ volatile("nop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\n"); \
+    _CVBS_HW_SET(_s); \
+    _CVBS_HW_CLR(_video_mask ^ _s); \
+	__asm__ volatile("nop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\n"); \
 } while (0)
-uint32_t _sync_mask;    /* (1U << 16) for GPIO16 */
-uint32_t _video_mask;   /* (1U << 17) for GPIO17 */
 
-/* ── 状態変数 ───────────────────────────────────────────────────── */
+#elif defined(CONFIG_SOC_SERIES_MCXA1X3)
+/* MCXA153: GPIO3 PSOR/PCOR (高速 GPIO)、CTimer1 TC (1MHz カウンタ)
+ *
+ * GPIO3 (0x40105000):
+ *   PSOR +0x44 = 0x40105044  Set output high
+ *   PCOR +0x48 = 0x40105048  Set output low (clear)
+ *
+ * CTimer1 (0x40005000):
+ *   TC   +0x08 = 0x40005008  Timer Counter (prescale=95 → 1MHz = 1µs/tick)
+ *
+ * ZephyrにAPIがないため直叩きを使う (MCXA1X3 限定)。                   */
+#define _CVBS_HW_SET(m)   do { (*(volatile uint32_t *)0x40105044U) = (m); } while (0)
+#define _CVBS_HW_CLR(m)   do { (*(volatile uint32_t *)0x40105048U) = (m); } while (0)
+#define _CVBS_TIMER_TC    (*(volatile uint32_t *)0x40005008U)
+
+/* CTimer1 直接レジスタアクセス (H-sync ジッタ排除)
+ *
+ * 問題: Zephyr counter driver preamble (CTIMER_GetStatusFlags +
+ *   CTIMER_ClearStatusFlags + read TC + callback dispatch) = ~50-200cy。
+ *   I-cache の cold/warm 状態で変動し、_cvbs_line_cb() 呼び出しまでに
+ *   ±数 µs のジッタが生じる → H-sync 立下りエッジが揺れる。
+ *
+ * 解決: irq_connect_dynamic() で _sw_isr_table[CTimer1_IRQ] を上書きし、
+ *   直接 _cvbs_direct_isr() を登録する。
+ *   z_arm_isr_wrapper は引き続き context save を行うが (~20cy 固定)、
+ *   driver preamble は実行されない。
+ *   SYNC=L が alarm 発火から固定遅延 (~0.33µs) で出力される。
+ *
+ * CTimer1 レジスタ:
+ *   IR  +0x00 = 0x40005000  Interrupt Register   (bit0: MR0 match)
+ *   MCR +0x14 = 0x40005014  Match Control Register (bit0: MR0I interrupt)
+ *   MR0 +0x18 = 0x40005018  Match Register 0     (次 alarm 絶対時刻)   */
+#define _CTIMER1_BASE  0x40005000U
+#define _CTIMER1_IR    (*(volatile uint32_t *)(_CTIMER1_BASE + 0x00U))
+#define _CTIMER1_MCR   (*(volatile uint32_t *)(_CTIMER1_BASE + 0x14U))
+#define _CTIMER1_MR0   (*(volatile uint32_t *)(_CTIMER1_BASE + 0x18U))
+
+/* PORT3 PCR (Pin Control Register) — CVBS GPIO スルーレート設定
+ *
+ * 問題: MCXA153 GPIO のデフォルトは SRE=0 (高速スルーレート)。
+ *   急峻な立上り/立下りエッジ が 100Ω/470Ω 抵抗合成回路の寄生インダクタンス
+ *   (PCB トレース + リード線) と共振し、CVBS 出力に大きなアンダーシュートを生じる。
+ *
+ * 解決: video_on() で PCR[14]/PCR[15] に SRE=1 (slow slew) を設定する。
+ *   スルーレートを落としてアンダーシュートを抑制。
+ *   DSE=0, DSE1=0 (low drive) で過剰な駆動電流も防ぐ。
+ *   ZephyrにAPIがないため直叩きを使う (MCXA1X3 限定)。
+ *
+ * PORT3_BASE = 0x400BF000, PCR[n] at +0x80 + n×4
+ *   PCR bit 3 = SRE: 0=fast slew (default), 1=slow slew
+ *   PCR bit 6 = DSE: 0=low drive strength
+ *   PCR bit 7 = DSE1: 0=low drive strength                              */
+#define _PORT3_PCR_BASE  (0x400BF000U + 0x80U)
+#define _PORT3_PCR(n)    (*(volatile uint32_t *)(_PORT3_PCR_BASE + (uint32_t)(n) * 4U))
+
+/* DWT CYCCNT (Cortex-M33, 96MHz サイクルカウンタ)
+ *
+ * 問題: _CVBS_WAIT_UNTIL は CTimer1 TC (1MHz) を使用するため、スピンループ出口が
+ *   TC クロック周期内 (96cy) のどこで発生するか不定 → ライン毎に 0-9cy のジッタ。
+ *   96MHz で 9cy = 94ns ≈ 0.75px @ 12cy/pixel → 画面上の水平方向 ±1px のちらつき。
+ *
+ * 解決: DWT CYCCNT (96MHz) に切り替え、スピンループ出口ジッタを ~0-3cy (≈31ns
+ *   ≈ 0.25px) に削減する。
+ *   ISR 発火基準時刻 t0 = _DWT_CYCCNT (SYNC=L の直後) をアンカーとし、
+ *   全タイミングを t0 からのサイクル数で指定する。
+ *
+ * 有効化: DEMCR.TRCENA=1 (bit24) → DWT.CTRL.CYCCNTENA=1 (bit0)。
+ * ZephyrにAPIがないため直叩きを使う (MCXA1X3 限定)。                       */
+#define _DWT_DEMCR   (*(volatile uint32_t *)0xE000EDFCU) /* CoreDebug->DEMCR */
+#define _DWT_CTRL    (*(volatile uint32_t *)0xE0001000U) /* DWT->CTRL        */
+#define _DWT_CYCCNT  (*(volatile uint32_t *)0xE0001004U) /* DWT->CYCCNT      */
+
+/* 96MHz サイクルカウンタ待機。signed 比較でラップアラウンドを正しく処理。  */
+#define _CVBS_WAIT_UNTIL_CYC(t) do { \
+    while ((int32_t)(_DWT_CYCCNT - (uint32_t)(t)) < 0) {} \
+} while (0)
+
+/* ブランチレスピクセル出力 (MCXA153)
+ * GPIO3 PSOR/PCOR への AHB 書き込み + ブランチレスマスク計算。
+ *
+ * タイミング計算 (Cortex-M33 @ 96MHz):
+ *   overhead (NOPなし) = 8cy/pixel:
+ *     ldr r5(1) + ubfx(1,latency隠蔽) + mul(1) + str PSOR(1)
+ *     + ldr r6(1) + load-use stall(1) + eors(1) + str PCOR(1) = 8cy
+ *   目標: 22cy/pixel → NOP = 22-8 = 14
+ *   14 NOPs: 22cy/pixel → 8px×22cy = 176cy/char = 1.833µs/char
+ *     32col × 1.833µs = 58.7µs アクティブビデオ (N=13比+4.8%)
+ *   ※ 多すぎれば文字幅が広がり、少なければ狭まる → 実機で微調整。   */
+#define _CVBS_PIXEL(p) do { \
+    uint32_t _s = (uint32_t)(-(int32_t)((uint8_t)(p) >> 7)) & _video_mask; \
+    _CVBS_HW_SET(_s); \
+    _CVBS_HW_CLR(_video_mask ^ _s); \
+    __asm__ volatile("nop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\nnop\n"); \
+} while (0)
+
+#endif /* platform */
+
+/* ── 共通: 絶対時刻待機 ─────────────────────────────────────────────────
+ * t = fire_time + オフセット(µs) で指定。
+ * ISR entry の可変遅延に依らずタイミングを alarm 発火時刻に固定する。
+ * signed 比較で uint32_t のラップアラウンドを正しく処理する。            */
+#define _CVBS_WAIT_UNTIL(t) do { \
+    while ((int32_t)(_CVBS_TIMER_TC - (uint32_t)(t)) < 0) {} \
+} while (0)
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * ── 共通 状態変数 ─────────────────────────────────────────────────────── */
+uint32_t _sync_mask;              /* (1U << sync_pin) */
+uint32_t _video_mask;             /* (1U << video_pin) */
 volatile uint16_t _cvbs_line;
-struct counter_alarm_cfg _cvbs_alarm;
+struct counter_alarm_cfg _cvbs_alarm;   /* RP2040 alarm callback 用 */
 bool _cvbs_on;
 /* フォントパターン SRAM コピー。
- * XIP Flash (CHAR_PATTERN) はキャッシュミス時 ~80cy のペナルティがある。
- * ISR が呼ばれるたびに BASIC インタープリタが 16KB XIP キャッシュを
- * 入れ替えるため、スキャン行 0 でキャッシュミスが発生しやすく
- * 他の行との間にピクセル位置ずれ (字形崩れ) を引き起こす。
- * video_on() で SRAM にコピーして ISR 内の読み取りを確定的にする。       */
+ * XIP Flash (CHAR_PATTERN) はキャッシュミス時 ~80cy のペナルティ。
+ * BASIC インタープリタが 16KB XIP キャッシュを入れ替えるため、
+ * スキャン行 0 でキャッシュミスが発生しピクセル位置がずれる。
+ * video_on() で SRAM にコピーして全スキャン行の読み取りを均一化。       */
 static uint8_t _cvbs_font[256 * 8];
-/* 次ライン ISR の「本来の」絶対発火時刻 (µs, 1MHz カウンタ値)。
- * ISR が遅延した場合でも次のアラームを本来の時刻から計算することで
- * ジッタを1ライン内に閉じ込め、長期的な H-sync 周期を安定させる。 */
+/* 次ライン ISR の「本来の」絶対発火時刻 (1MHz カウンタ値 = µs)。
+ * ISR が遅延しても次アラームを本来の時刻から計算し
+ * 長期的な H-sync 周期を 64µs に安定させる。                           */
 volatile uint32_t _cvbs_next_line_time;
 
-/* ── ライン ISR ─────────────────────────────────────────────────
- * counter alarm callback。
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * ── RP2040: alarm スケジュール + callback ISR ───────────────────────── */
+#if defined(CONFIG_SOC_SERIES_RP2040)
+
+/* RP2040: counter driver の ABSOLUTE バグ回避
+ *   driver bug: ABSOLUTE 設定時 target=0 → alarm_at=now → 常に -ETIME。
+ *   対策: 相対 ticks=64µs で callback のみ登録し (-ETIME 回避)、
+ *   直後に ALARM0 を絶対時刻で上書きして正確な発火時刻を指定する。      */
+static inline void _cvbs_sched_alarm(const struct device *dev, uint8_t chan)
+{
+    _cvbs_alarm.ticks = _CVBS_HTOTAL_US; /* callback 登録目的; 64µs先 → -ETIME不発生 */
+    counter_set_channel_alarm(dev, chan, &_cvbs_alarm);
+    /* ALARM0 を目標絶対時刻で上書き (driver 内部の可変 TIMELR 読み取りをバイパス) */
+    _CVBS_ALARM0_REG = _cvbs_next_line_time;
+    /* ARMED=0: 書いた時刻が既に過去 → 1周期後に回復 */
+    if (!(_CVBS_TIMER_ARMED & 1u)) {
+        _cvbs_next_line_time = _CVBS_TIMER_TC + _CVBS_HTOTAL_US;
+        _CVBS_ALARM0_REG = _cvbs_next_line_time;
+    }
+}
+
+/* RP2040 ライン ISR (counter alarm callback)
  *
  * タイミング設計:
- *   SYNC=L を ISR の最初の1命令でアサートし、その後の全処理
- *   (alarm 再スケジュール、カウンタ更新 = 可変オーバーヘッド) を
- *   SYNC パルス中 (~4µs = 500cy) に収める。
- *   ピクセル開始は _CVBS_WAIT_UNTIL(ticks + 12) で絶対時刻指定するため、
- *   counter_set_channel_alarm() の XIP キャッシュミス等による
- *   50〜300cy のオーバーヘッドがピクセル位置に影響しない。
- *
- *   alarm 再スケジュール: counter_set_channel_alarm 直前に TIMELR を読み
- *   相対 delay = _cvbs_next_line_time - TIMELR_now を計算する。
- *   alarm_fire ≈ _cvbs_next_line_time + 定数Δ (Δ=call overhead≈200ns)
- *   → H-sync 周期 ≈ 64µs。ピクセル開始は ticks+12µs で固定。
- *
- *   alarm0 IRQ 優先度 = 0 (最高、overlay で設定) により
- *   Zephyr カーネル tick (SysTick/優先度3) が割り込めない。            */
+ *   ① SYNC=L を ISR の最初の1命令でアサート。
+ *   ② fire_time = _cvbs_next_line_time (インクリメント前) を基準とする。
+ *      ticks はドライバが読んだ TC 値で ±1µs ジッタがあるため使用しない。
+ *   ③ _CVBS_WAIT_UNTIL(fire_time + N) で全タイミングを alarm 発火時刻に固定。
+ *   alarm IRQ 優先度 = 0 (最高、overlay で設定) により
+ *   Zephyr カーネル tick が CVBS ISR を割り込めない。                   */
 void _cvbs_line_cb(const struct device *dev, uint8_t chan,
                    uint32_t ticks, void *user_data)
 {
     ARG_UNUSED(user_data);
+    ARG_UNUSED(ticks);
 
-    /* ── ① ISR 先頭で即座に SYNC=L ──────────────────────────────────
-     * alarm 発火から最短経路でアサート。以降の全タイミングを
-     * ticks (alarm 発火の 1µs 境界値) 基準にする。                    */
-    _SIO_CLR = _sync_mask | _video_mask;           /* SYNC=L, VIDEO=L */
+    _CVBS_HW_CLR(_sync_mask | _video_mask);      /* SYNC=L, VIDEO=L */
 
-    /* ── ② 次ライン alarm をスケジュール ─────────────────────────────
-     * RP2040 Zephyr counter driver の COUNTER_ALARM_CFG_ABSOLUTE は
-     * driver バグ (target=0 → alarm_at=now → 常に -ETIME) のため使用不可。
-     * 相対アラームで「直前の TIMELR 読み取り」を使って差分を計算する:
-     *   _ticks = _cvbs_next_line_time - _now  (相対 delay)
-     *   alarm_fire = driver_now + _ticks
-     *              ≈ (_now + Δ) + (_cvbs_next_line_time - _now)
-     *              = _cvbs_next_line_time + Δ   (Δ = call overhead、定数)
-     * Δ は毎ライン同じ経路を通るため定数 → H-sync 周期が安定する。
-     * -ETIME: driver が callback を NULL にして ISR チェーンが断絶する。
-     * 必ず戻り値を確認してリカバリする。                               */
+    uint32_t fire_time = _cvbs_next_line_time;    /* alarm 発火時刻 (ジッタゼロ) */
     _cvbs_next_line_time += _CVBS_HTOTAL_US;
-    uint32_t _now = _CVBS_TIMER_RAW;          /* counter_set直前にTIMELR読取 */
-    int32_t _ticks = (int32_t)(_cvbs_next_line_time - _now);
-    if (_ticks <= 0) {
-        _now = _CVBS_TIMER_RAW;
-        _cvbs_next_line_time = _now + _CVBS_HTOTAL_US;
-        _ticks = _CVBS_HTOTAL_US;
-    }
-    _cvbs_alarm.ticks = (uint32_t)_ticks;
-    if (counter_set_channel_alarm(dev, chan, &_cvbs_alarm) == -ETIME) {
-        _now = _CVBS_TIMER_RAW;
-        _cvbs_next_line_time = _now + _CVBS_HTOTAL_US;
-        _cvbs_alarm.ticks   = _CVBS_HTOTAL_US;
-        counter_set_channel_alarm(dev, chan, &_cvbs_alarm);
-    }
+    _cvbs_sched_alarm(dev, chan);                 /* 次ライン alarm スケジュール */
 
     uint16_t ln = _cvbs_line;
     _cvbs_line = (ln + 1u < _CVBS_LINES) ? (uint16_t)(ln + 1u) : 0u;
-    _g.linecnt++;  /* TICK(1)/WAIT -n 用ラインカウンタ */
+    _g.linecnt++;
 
     if (ln < 12u) {
-        /* ── Vsync ライン: ロングパルス × 12ライン ─────────────────── */
         if (ln == 0u) { frames++; }
-        /* SYNC=L 済み。ticks+58µs まで絶対待機して SYNC=H。           */
-        _CVBS_WAIT_UNTIL(ticks + _CVBS_VSYNC_US);
-        _SIO_SET = _sync_mask;                     /* SYNC=H */
+        _CVBS_WAIT_UNTIL(fire_time + _CVBS_VSYNC_US);
+        _CVBS_HW_SET(_sync_mask);
         return;
     }
 
-    /* ── ③ 通常ライン: ticks 基準の絶対待機でピクセル開始位置を固定 ───
-     * _CVBS_WAIT_UNTIL(ticks + N) は alarm 発火時刻からの絶対オフセット。
-     * ISR 内のオーバーヘッドが何 µs かかっても、ピクセル出力は常に
-     * ticks + 12µs から始まるため全スキャンライン間で水平位置が一致する。*/
-    _CVBS_WAIT_UNTIL(ticks + _CVBS_HSYNC_US);              /* 4µs: SYNC=H */
-    _SIO_SET = _sync_mask;                                  /* SYNC=H */
-    _CVBS_WAIT_UNTIL(ticks + _CVBS_HSYNC_US + _CVBS_BACK_US); /* 12µs: pixel start */
+    _CVBS_WAIT_UNTIL(fire_time + _CVBS_HSYNC_US);
+    _CVBS_HW_SET(_sync_mask);
+    _CVBS_WAIT_UNTIL(fire_time + _CVBS_HSYNC_US + _CVBS_BACK_US);
 
     if (ln >= _CVBS_ACT_FIRST && ln < (uint16_t)(_CVBS_ACT_FIRST + _CVBS_ACT_LINES)) {
-        /* ── アクティブライン: 映像出力 ─────────────────────────── */
         int vln = (int)ln - _CVBS_ACT_FIRST;
-        int cy  = vln >> 3;   /* キャラクタ行 0..23 */
-        int sr  = vln & 7;    /* キャラクタ内スキャン行 0..7 */
-
+        int cy  = vln >> 3;
+        int sr  = vln & 7;
         const uint8_t *vrow = vram + cy * 32;
-
-        /* PCG の先頭コード: SIZE_PCG=32 なら 256-32=224=0xE0。
-         * IchigoJam は 0xE0-0xFF (= 32文字) をユーザー定義 PCG として使う。
-         * screen_clp() で CHAR_PATTERN[0xE0*8..] → screen_pcg にコピー済み。
-         * vram はゼロクリア (0x00=null) で初期化されるため、
-         * 0x00 を CHAR_PATTERN ではなく screen_pcg で引くと 0xE0 の字形 (非空白) が
-         * 表示されてしまう。0xE0 未満はすべて CHAR_PATTERN を参照すること。 */
-        const uint8_t _pcg_first = (uint8_t)(256u - (uint32_t)SIZE_PCG); /* 0xE0 */
+        const uint8_t _pcg_first = (uint8_t)(256u - (uint32_t)SIZE_PCG);
 
         for (int col = 0; col < 32; col++) {
             uint8_t ch  = vrow[col];
-            /* ch >= 0xE0: user PCG, ch < 0xE0: standard font */
             uint8_t pat = (ch >= _pcg_first)
                 ? screen_pcg[(ch - _pcg_first) * 8u + (uint8_t)sr]
-                : _cvbs_font[ch * 8 + sr];  /* SRAM コピー: XIP キャッシュミス防止 */
+                : _cvbs_font[ch * 8 + sr];
 
-            /* 8ビットを MSB 順にブランチレス出力。
-             * _CVBS_PIXEL(p) は bit7 を出力し、`p <<= 1` で次ビットを MSB へ繰り上げる。
-             * 全ビット均一 17cy = 136ns。8bit × 136ns = 1.088µs/char。          */
             uint8_t _p = pat;
             _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
             _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
@@ -234,11 +299,134 @@ void _cvbs_line_cb(const struct device *dev, uint8_t chan,
             _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
             _CVBS_PIXEL(_p);
         }
-        _SIO_CLR = _video_mask;                /* VIDEO=L (フロントポーチ) */
+        _CVBS_HW_CLR(_video_mask);
     }
 }
 
-/* ── 公開 API ────────────────────────────────────────────────────── */
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * ── MCXA153: 直接 ISR (H-sync ジッタ排除) ───────────────────────────── */
+#elif defined(CONFIG_SOC_SERIES_MCXA1X3)
+
+/* CTimer1 TC (1µs) と DWT CYCCNT (96MHz) の位相差。
+ * CYCCNT = TC * 96 + _cvbs_cy_phase (定数)。
+ * video_on() で測定し、ISR 内で fire_time(µs) → CYCCNT target 変換に使用。
+ *
+ * ジッタ排除の仕組み:
+ *   _CVBS_WAIT_UNTIL_CYC(_cvbs_cy_phase + (fire_time + N) * 96U) は
+ *   「TC が fire_time+N になる瞬間の CYCCNT」を直接計算して待機する。
+ *   ISR latency (IRQ遅延・LDM stall 等の変動) に依らずタイミングが固定される。
+ *   exit 精度 ~0-3cy (≈31ns ≈ 0.25px @ 18cy/pixel)。                   */
+static uint32_t _cvbs_cy_phase;
+
+/* MCXA153 直接 ライン ISR
+ *
+ * irq_connect_dynamic() により _sw_isr_table[CTimer1_IRQ] に登録される。
+ * z_arm_isr_wrapper 経由で呼ばれるが driver preamble は実行されない。
+ *
+ * タイミング設計:
+ *   ① cy_phase + fire_time*96 + 48 まで待機 → SYNC=L アサート (絶対時刻固定)
+ *   ② SYNC=L 直後に t_sync_l = CYCCNT をキャプチャ
+ *   ③ 以降の全タイミングを t_sync_l 基準で指定する
+ *
+ * ③ の理由:
+ *   wrapper latency (60-160cy 可変) で SYNC=L が ① の目標時刻より遅れた場合、
+ *   cy_phase+(fire_time+N)*96 は既に過去 → WAIT が即時 exit → SYNC=H・VIDEO が
+ *   SYNC=L エッジから N µs ではなく「待機ゼロ」でアサートされる。
+ *   スコープが SYNC=L でトリガするため VIDEO の相対位置が毎ライン変わって見える。
+ *   t_sync_l 基準にすれば wrapper latency に関わらず VIDEO 位置が SYNC=L から
+ *   常に固定距離となり、スコープ上のジッタが消える。
+ *
+ * __ramfunc (section(".ramfunc")): ISR 全体を SRAM から実行する。
+ *   vblank 期間に BASIC インタープリタが Flash I-cache を入れ替えるため、
+ *   アクティブライン先頭でキャッシュミス (~50-100cy) が発生する問題を解消。
+ *   ZephyrにAPIがないため直叩きを使う (MCXA1X3 限定)。                   */
+static void __attribute__((section(".ramfunc"))) _cvbs_direct_isr(const void *arg)
+{
+    ARG_UNUSED(arg);
+
+    /* ── ① SYNC=L を fire_time 基準の固定絶対時刻にアサート ────────── */
+    uint32_t fire_time = _cvbs_next_line_time;   /* scheduled 発火時刻 (1µs) */
+    _CVBS_WAIT_UNTIL_CYC(_cvbs_cy_phase + fire_time * 96U + 48U);
+    _CVBS_HW_CLR(_sync_mask | _video_mask);      /* SYNC=L */
+
+    /* ② SYNC=L エッジ直後の CYCCNT をキャプチャ。
+     *   以降の全タイミング (HSYNC, backporch, pixel) をここからの相対値で指定。
+     *   ISR latency / wrapper latency の変動が pixel 位置に影響しない。
+     *   _DWT_CYCCNT 読み取りは PPB レイテンシ ~2cy を含むため、
+     *   t_sync_l = SYNC=L アサートから約 2cy 後の値。定数オフセットなので問題なし。 */
+    uint32_t t_sync_l = _DWT_CYCCNT;
+
+    /* ── ③ MR0 割り込みフラグクリア + 次 alarm 設定 ───────────────── */
+    _CTIMER1_IR = 0x01U;
+    _cvbs_next_line_time += _CVBS_HTOTAL_US;
+    _CTIMER1_MR0 = _cvbs_next_line_time;
+
+    uint16_t ln = _cvbs_line;
+    _cvbs_line = (ln + 1u < _CVBS_LINES) ? (uint16_t)(ln + 1u) : 0u;
+    _g.linecnt++;
+
+    /* ── ④ ライン種別に応じた映像出力 ──────────────────────────────── */
+    if (ln < 12u) {
+        if (ln == 0u) { frames++; }
+        _CVBS_WAIT_UNTIL_CYC(t_sync_l + (uint32_t)_CVBS_VSYNC_US * 96U);
+        _CVBS_HW_SET(_sync_mask);
+        return;
+    }
+
+    _CVBS_WAIT_UNTIL_CYC(t_sync_l + (uint32_t)_CVBS_HSYNC_US * 96U);
+    _CVBS_HW_SET(_sync_mask);
+
+    /* ── アクティブライン用データをバックポーチ待機中に事前計算 ───────────
+     * SYNC=H ～ backporch 終了 = 8µs = 768cy の余裕がある。
+     * この間に vrow/sr/_pcg_first を計算しておき、backporch 終了後の
+     * コードパスを最短にしてピクセル開始位置のジッタを最小化する。       */
+    const uint8_t _pcg_first = (uint8_t)(256u - (uint32_t)SIZE_PCG);
+    bool _act = (ln >= _CVBS_ACT_FIRST &&
+                 ln <  (uint16_t)(_CVBS_ACT_FIRST + _CVBS_ACT_LINES));
+    int  _vln = (int)ln - _CVBS_ACT_FIRST;
+    int  _sr  = _vln & 7;
+    /* _act が false のとき _vln は負になる可能性がある。
+     * _vrow は _act==true のときのみ参照するため NULL で安全。            */
+    const uint8_t *_vrow = _act ? (vram + (_vln >> 3) * 32) : NULL;
+
+    _CVBS_WAIT_UNTIL_CYC(t_sync_l + (uint32_t)(_CVBS_HSYNC_US + _CVBS_BACK_US) * 96U);
+
+    if (_act) {
+        /* ピクセル開始アンカー: backporch 終了から +16cy 後に pixel 出力を固定。
+         *
+         * バックポーチ WAIT の exit jitter (0-4cy) と if+branch (~3cy) を
+         * 吸収するための 16cy マージン。事前計算済みのため他の処理はない。
+         * アンカー exit jitter = 0-4cy (≈42ns ≈ 0.18px) のみ残留する。
+         *
+         * ピクセル開始位置: t_sync_l + (4+8)µs * 96 + 16 + ~12cy overhead
+         * = t_sync_l + ~1180cy ≈ 12.3µs 後に VIDEO 開始。               */
+        _CVBS_WAIT_UNTIL_CYC(t_sync_l +
+            (uint32_t)(_CVBS_HSYNC_US + _CVBS_BACK_US) * 96U + 16U);
+
+        for (int col = 0; col < 32; col++) {
+            uint8_t ch  = _vrow[col];
+            uint8_t pat = (ch >= _pcg_first)
+                ? screen_pcg[(ch - _pcg_first) * 8u + (uint8_t)_sr]
+                : _cvbs_font[ch * 8 + (uint8_t)_sr];
+
+            uint8_t _p = pat;
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
+            _CVBS_PIXEL(_p);
+        }
+        _CVBS_HW_CLR(_video_mask);
+    }
+}
+
+#endif /* RP2040 / MCXA1X3 ISR */
+
+/* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ * ── 共通 公開 API ─────────────────────────────────────────────────────── */
 
 INLINE void video_on(void) {
     SCREEN_W = 32;
@@ -246,13 +434,23 @@ INLINE void video_on(void) {
     if (_cvbs_on) { return; }
 
     /* CHAR_PATTERN (Flash/XIP) を SRAM にコピー。
-     * ISR 内での Flash 読み取りはキャッシュミス時 ~80cy かかるため
-     * スキャン行 0 だけピクセル位置がずれて字形が崩れる原因になる。
-     * SRAM コピーにより全スキャン行の読み取り時間を均一化する。         */
+     * ISR 内での Flash 読み取りはキャッシュミス時 ~80cy。
+     * SRAM コピーにより全スキャン行の読み取り時間を均一化。             */
     memcpy(_cvbs_font, CHAR_PATTERN, 256 * 8);
 
     gpio_pin_configure_dt(&_cvbs_sync,  GPIO_OUTPUT_LOW);
     gpio_pin_configure_dt(&_cvbs_video, GPIO_OUTPUT_LOW);
+
+#if defined(CONFIG_SOC_SERIES_MCXA1X3)
+    /* PORT3 PCR: slow slew rate, low drive strength for CVBS GPIO (P3_14/P3_15).
+     * gpio_pin_configure_dt() の後に設定する (GPIO driver が PCR を上書きする場合に備え)。
+     * SRE=1(bit3), DSE=0(bit6), DSE1=0(bit7) を書き込む。
+     * ピン番号は DTS の gpio spec から取得 (P3_14=pin14, P3_15=pin15)。        */
+    _PORT3_PCR((uint32_t)_cvbs_sync.pin)  =
+        (_PORT3_PCR((uint32_t)_cvbs_sync.pin)  & ~(0x40U | 0x80U)) | 0x08U;
+    _PORT3_PCR((uint32_t)_cvbs_video.pin) =
+        (_PORT3_PCR((uint32_t)_cvbs_video.pin) & ~(0x40U | 0x80U)) | 0x08U;
+#endif
 
     _sync_mask  = (1U << (uint32_t)_cvbs_sync.pin);
     _video_mask = (1U << (uint32_t)_cvbs_video.pin);
@@ -260,28 +458,98 @@ INLINE void video_on(void) {
     _cvbs_ctr = DEVICE_DT_GET(DT_CHOSEN(ij_cvbs_timer));
     _cvbs_line = 0u;
 
-    /* 初期発火時刻を現在時刻 + 1周期に設定 */
     uint32_t _t0;
     counter_get_value(_cvbs_ctr, &_t0);
     _cvbs_next_line_time = _t0 + _CVBS_HTOTAL_US;
 
+#if defined(CONFIG_SOC_SERIES_RP2040)
+    /* RP2040: counter alarm callback で ISR を起動する。
+     * ABSOLUTE driver バグのため相対モード (flags=0) で初回発火。        */
     _cvbs_alarm.callback  = _cvbs_line_cb;
-    _cvbs_alarm.ticks     = _CVBS_HTOTAL_US;  /* 相対: 初回のみ使用 */
-    _cvbs_alarm.flags     = 0u;               /* 相対モード (ABSOLUTEはdriverバグのため使用不可) */
     _cvbs_alarm.user_data = NULL;
-
+    _cvbs_alarm.flags = 0u;
+    _cvbs_alarm.ticks = _CVBS_HTOTAL_US;
     counter_start(_cvbs_ctr);
     counter_set_channel_alarm(_cvbs_ctr, 0, &_cvbs_alarm);
+
+#elif defined(CONFIG_SOC_SERIES_MCXA1X3)
+    /* DWT CYCCNT 有効化 (per-line 水平ジッタ排除)。
+     * CYCCNT (96MHz) を ISR 内タイミング基準として使用し、
+     * CTimer1 TC (1MHz) スピンループの 0-9cy 出口ジッタを排除する。
+     * DEMCR.TRCENA=1 (bit24): DWT/ITM/ETM へのクロック供給を有効化。
+     * DWT.CTRL.CYCCNTENA=1 (bit0): CYCCNT を 96MHz でカウント開始。
+     * ZephyrにAPIがないため直叩きを使う (MCXA1X3 限定)。              */
+    _DWT_DEMCR  |= (1UL << 24);  /* TRCENA */
+    _DWT_CYCCNT  = 0U;           /* カウンタリセット */
+    _DWT_CTRL   |= (1UL << 0);   /* CYCCNTENA */
+
+    /* MCXA153: irq_connect_dynamic() で CTimer1 ISR を直接登録。
+     *
+     * driver init 済み (CTIMER_Init: clock enable, PR=95, TC=0, stopped)。
+     * counter_start() の前に MR0/MCR を設定することで
+     * TC 開始直後から正確な 64µs 周期で alarm が発火する。
+     *
+     * _sw_isr_table[CTimer1_IRQ] を _cvbs_direct_isr で上書きするため
+     * CONFIG_DYNAMIC_INTERRUPTS=y が必要 (prj.conf 参照)。
+     * IRQ の enable は driver init 時に完了済みのため irq_enable() 不要。 */
+    _CTIMER1_MR0 = _cvbs_next_line_time;          /* 初回発火時刻を設定 */
+    _CTIMER1_MCR = 0x01U;                          /* MR0I: MR0 match で interrupt */
+    counter_start(_cvbs_ctr);                      /* TC カウント開始 */
+    /* TC と CYCCNT の位相差を測定: cy_phase = CYCCNT - TC*96。
+     * double-read で TC 境界またぎを排除 (誤差 ≤2cy → 水平位置誤差 ≤0.17px)。 */
+    {
+        uint32_t _ta, _tb, _cy;
+        do { _ta = _CVBS_TIMER_TC; _cy = _DWT_CYCCNT; _tb = _CVBS_TIMER_TC; } while (_ta != _tb);
+        _cvbs_cy_phase = _cy - _ta * 96U;
+    }
+    /* irq_connect_dynamic(): NVIC priority 0 (IRQ_ZERO_LATENCY) に設定し IRQ を有効化。
+     * _sw_isr_table への登録は行われるが、次のベクタテーブル上書きで使われなくなる。 */
+    irq_connect_dynamic(
+        DT_IRQ(DT_CHOSEN(ij_cvbs_timer), irq),
+        0, _cvbs_direct_isr, NULL, IRQ_ZERO_LATENCY);
+
+    /* ARM ベクタテーブル (SRAM) に直接 _cvbs_direct_isr を登録。
+     *
+     * 問題: z_arm_isr_wrapper (Flash) はキャッシュミス時 +50-100cy の可変遅延。
+     *   BASIC インタープリタが Flash I-cache を置き換えると wrapper がコールドになり、
+     *   SYNC=L エッジが 48cy の余裕を超えてずれ → ライン毎の水平ジッタが残る。
+     *
+     * 解決: CONFIG_SRAM_VECTOR_TABLE=y (prj.conf) でベクタテーブルを SRAM に移動。
+     *   CTimer1 IRQ エントリを直接 _cvbs_direct_isr に上書きし wrapper を完全排除。
+     *   ISR latency = CM33 ハードウェア固定 12cy + LDM stall 0-9cy のみ。
+     *   -> 48cy マージンで確実に吸収 → SYNC=L ジッタ ≈ 0cy。
+     *
+     * SCB->VTOR (0xE000ED08): ベクタテーブルのベースアドレス。
+     *   エントリ[16 + irq] に Thumb アドレス (bit0=1) を書き込む。
+     *   _cvbs_direct_isr は bare CM33 exception handler として動作:
+     *     CM33 が context save/restore を自動実行、Zephyr wrapper 不要。
+     *   ZephyrにAPIがないため直叩きを使う (MCXA1X3 限定)。                 */
+    {
+        uint32_t _irqn = DT_IRQ(DT_CHOSEN(ij_cvbs_timer), irq);
+        volatile uint32_t *_vt =
+            (volatile uint32_t *)(*(volatile uint32_t *)0xE000ED08U); /* SCB->VTOR */
+        _vt[16u + _irqn] = ((uint32_t)_cvbs_direct_isr) | 1U;        /* Thumb bit */
+        /* ARM barrier: ベクタテーブル書き込みを確実に完了させ新エントリを即時有効化。
+         * DSB: STR がメモリに到達するまで後続命令を待機 (store buffer flush)。
+         * ISB: パイプライン/プリフェッチをフラッシュ → 次の例外は新エントリを参照。
+         * これを省くと I-cache/store buffer に旧エントリが残り wrapper が呼ばれ続ける。
+         * ZephyrにAPIがないため直叩きを使う (MCXA1X3 限定)。               */
+        __asm__ volatile ("dsb" ::: "memory");
+        __asm__ volatile ("isb" ::: "memory");
+    }
+#endif
+
     _cvbs_on = true;
 }
 
 INLINE void video_off(int clkdiv) {
     ARG_UNUSED(clkdiv);
     if (!_cvbs_on) { return; }
-    /* アラームをキャンセルするだけ。counter_stop() はタイマをリセットする
-     * ため呼ばない (他の用途に影響する可能性がある)。                    */
+    /* counter_cancel_channel_alarm: CTIMER_DisableInterrupts(base, 1) →
+     * MCR bit0 をクリアし MR0 割り込みを停止する。
+     * RP2040/MCXA153 ともに driver API 経由で安全に停止できる。          */
     counter_cancel_channel_alarm(_cvbs_ctr, 0);
-    _SIO_CLR = _sync_mask | _video_mask;
+    _CVBS_HW_CLR(_sync_mask | _video_mask);
     _cvbs_on = false;
 }
 
@@ -296,23 +564,22 @@ INLINE void IJB_lcd(uint mode) {
 
 /* video_waitSync(n): n フレーム待機。
  * CVBS 動作中は frames カウンタをポーリング、停止中は k_sleep で代替。
- * CLAUDE.md の制約: M6 以降も最低 16ms の yield を保証すること。      */
+ * CLAUDE.md の制約: 最低 16ms の yield を保証する。                    */
 INLINE void video_waitSync(uint n) {
     if (n == 0u) { return; }
     if (_cvbs_on) {
         uint16_t target = (uint16_t)((uint16_t)frames + (uint16_t)n);
         while ((int16_t)(target - frames) > 0) {
-            k_sleep(K_MSEC(1));   /* yield しつつポーリング */
+            k_sleep(K_MSEC(1));
         }
     } else {
         k_sleep(K_MSEC((uint32_t)n * 1000u / 60u));
     }
 }
 
-#else /* !CONFIG_SOC_SERIES_RP2040 */
+#else /* !RP2040 && !MCXA1X3 */
 
-/* ── 非 RP2040 ボード: CVBS なし ────────────────────────────────
- * frdm_mcxa153 / frdm_mcxc444 では CVBS 出力を実装しない。
+/* ── 非対応ボード: CVBS なし ─────────────────────────────────────────
  * video_waitSync は k_sleep で 1/60s ずつ yield する。               */
 
 INLINE void video_on(void) {
@@ -332,14 +599,12 @@ INLINE void IJB_lcd(uint mode) {
     ARG_UNUSED(mode);
 }
 
-/* 1 tick = 1/60 sec ≈ 16.67ms
- * video_waitSync(70) at boot gives ~1.17s for USB CDC enumeration */
 INLINE void video_waitSync(uint n) {
     if (n > 0u) {
         k_sleep(K_MSEC((uint32_t)n * 1000u / 60u));
     }
 }
 
-#endif /* CONFIG_SOC_SERIES_RP2040 */
+#endif /* CONFIG_SOC_SERIES_RP2040 || CONFIG_SOC_SERIES_MCXA1X3 */
 
 #endif /* __DISPLAY_H__ */

@@ -11,12 +11,30 @@
  *
  * This overlay adds:
  *   ctimer0:        sound output → D13 / P2_12 (CT0_MAT0)
+ *   ctimer1:        CVBS line timer (M7) — 1MHz tick (prescale=95)
  *   flexpwm0_pwm1:  PWM 3/4    → P3_8  / P3_9  (sm1 chA/B)
  *   flexpwm0_pwm2:  PWM 5/6    → P3_10 / P3_11 (sm2 chA/B)
+ *
+ * CVBS 回路 (M7):
+ *   P3_14(SYNC) ─── 470Ω ──┬── CVBS出力 (75Ω終端テレビへ)
+ *   P3_15(VIDEO)─── 100Ω ──┘
+ *   D9 = P3_14 (SYNC),  D8 = P3_15 (VIDEO)
  */
 
 #include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/pwm/pwm.h>
+
+/*
+ * CVBS ライン ISR タイマー: CTimer1
+ * prescale = 95 → 96MHz / (95+1) = 1MHz → 1tick = 1µs (NTSC 64µs ライン周期に整合)
+ * CTimer0 は SOUND (BEEP/PLAY) で使用中のため CTimer1 を使用する。
+ * 割り込み優先度 0 (Cortex-M33 最高): Zephyr カーネル tick (SysTick/優先度1) を
+ * CVBS ISR が割り込まれないようにする。
+ */
+&ctimer1 {
+	status = "okay";
+	prescale = <95>;
+};
 
 /* Sound: CTimer0, CT0_MAT0 → D13 (P2_12) */
 &ctimer0 {
@@ -104,8 +122,9 @@
 
 / {
 	chosen {
-		ij-adc = &lpadc0;  /* ADC device for ANA()/IN() */
-		ij-i2c = &lpi2c0; /* I2C device for I2C() command */
+		ij-adc        = &lpadc0;   /* ADC device for ANA()/IN() */
+		ij-i2c        = &lpi2c0;  /* I2C device for I2C() command */
+		ij-cvbs-timer = &ctimer1; /* Counter device for CVBS line timer (M7) */
 	};
 
 	zephyr,user {
@@ -125,6 +144,9 @@
 		ij-in2-gpios  = <&gpio1 12 GPIO_ACTIVE_HIGH>;   /* A1 */
 		ij-in3-gpios  = <&gpio1 13 GPIO_ACTIVE_HIGH>;   /* A2 */
 		ij-in4-gpios  = <&gpio2  0 GPIO_ACTIVE_HIGH>;   /* A3 / ADC0_A0 */
+		/* M7: CVBS video output pins */
+		ij-cvbs-sync-gpios  = <&gpio3 14 GPIO_ACTIVE_HIGH>;  /* SYNC → 470Ω → CVBS : D9 P3_14 */
+		ij-cvbs-video-gpios = <&gpio3 15 GPIO_ACTIVE_HIGH>;  /* VIDEO→ 100Ω → CVBS : D8 P3_15 */
 
 		/*
 		 * PWM specs for IchigoJam sound and OUT PWM outputs.
