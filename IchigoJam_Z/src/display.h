@@ -342,87 +342,91 @@ static uint32_t _cvbs_cy_phase;
  *   ZephyrにAPIがないため直叩きを使う (MCXA1X3 限定)。                   */
 static void __attribute__((section(".ramfunc"))) _cvbs_direct_isr(const void *arg)
 {
-    ARG_UNUSED(arg);
+	ARG_UNUSED(arg);
 
-    /* ── ① SYNC=L を fire_time 基準の固定絶対時刻にアサート ────────── */
-    uint32_t fire_time = _cvbs_next_line_time;   /* scheduled 発火時刻 (1µs) */
-    _CVBS_WAIT_UNTIL_CYC(_cvbs_cy_phase + fire_time * 96U + 48U);
-    _CVBS_HW_CLR(_sync_mask | _video_mask);      /* SYNC=L */
+	/* ── 理想時刻（µs） ── */
+	uint32_t fire_time = _cvbs_next_line_time;
 
-    /* ② SYNC=L エッジ直後の CYCCNT をキャプチャ。
-     *   以降の全タイミング (HSYNC, backporch, pixel) をここからの相対値で指定。
-     *   ISR latency / wrapper latency の変動が pixel 位置に影響しない。
-     *   _DWT_CYCCNT 読み取りは PPB レイテンシ ~2cy を含むため、
-     *   t_sync_l = SYNC=L アサートから約 2cy 後の値。定数オフセットなので問題なし。 */
-    uint32_t t_sync_l = _DWT_CYCCNT;
+	/* ── ① SYNC=L を理想時刻でアサート ── */
+	_CVBS_WAIT_UNTIL_CYC(_cvbs_cy_phase + fire_time * 96U + 48U);
+	_CVBS_HW_CLR(_sync_mask | _video_mask);
 
-    /* ── ③ MR0 割り込みフラグクリア + 次 alarm 設定 ───────────────── */
-    _CTIMER1_IR = 0x01U;
-    _cvbs_next_line_time += _CVBS_HTOTAL_US;
-    _CTIMER1_MR0 = _cvbs_next_line_time;
+	/* ── ★重要：SYNC直後の基準を安定に取得 ──
+	 * ・GPIO書き込みの反映待ちに数NOP
+	 * ・CYCCNTダブルリードでばらつき低減
+	 */
+	__asm__ volatile("nop\nnop\nnop\nnop\n");  // 3〜6で調整可
 
-    uint16_t ln = _cvbs_line;
-    _cvbs_line = (ln + 1u < _CVBS_LINES) ? (uint16_t)(ln + 1u) : 0u;
-    _g.linecnt++;
+	uint32_t t1 = _DWT_CYCCNT;
+	uint32_t t2 = _DWT_CYCCNT;
+	uint32_t t_sync_l = (t1 + t2) >> 1;  // 実SYNC基準（低ジッタ）
 
-    /* ── ④ ライン種別に応じた映像出力 ──────────────────────────────── */
-    if (ln < 12u) {
-        if (ln == 0u) { frames++; }
-        _CVBS_WAIT_UNTIL_CYC(t_sync_l + (uint32_t)_CVBS_VSYNC_US * 96U);
-        _CVBS_HW_SET(_sync_mask);
-        return;
-    }
+	/* ── ② 次ライン予約 ── */
+	_CTIMER1_IR = 0x01U;
+	_cvbs_next_line_time += _CVBS_HTOTAL_US;
+	_CTIMER1_MR0 = _cvbs_next_line_time;
 
-    _CVBS_WAIT_UNTIL_CYC(t_sync_l + (uint32_t)_CVBS_HSYNC_US * 96U);
-    _CVBS_HW_SET(_sync_mask);
+	uint16_t ln = _cvbs_line;
+	_cvbs_line = (ln + 1u < _CVBS_LINES) ? (uint16_t)(ln + 1u) : 0u;
+	_g.linecnt++;
 
-    /* ── アクティブライン用データをバックポーチ待機中に事前計算 ───────────
-     * SYNC=H ～ backporch 終了 = 8µs = 768cy の余裕がある。
-     * この間に vrow/sr/_pcg_first を計算しておき、backporch 終了後の
-     * コードパスを最短にしてピクセル開始位置のジッタを最小化する。       */
-    const uint8_t _pcg_first = (uint8_t)(256u - (uint32_t)SIZE_PCG);
-    bool _act = (ln >= _CVBS_ACT_FIRST &&
-                 ln <  (uint16_t)(_CVBS_ACT_FIRST + _CVBS_ACT_LINES));
-    int  _vln = (int)ln - _CVBS_ACT_FIRST;
-    int  _sr  = _vln & 7;
-    /* _act が false のとき _vln は負になる可能性がある。
-     * _vrow は _act==true のときのみ参照するため NULL で安全。            */
-    const uint8_t *_vrow = _act ? (vram + (_vln >> 3) * 32) : NULL;
+	/* ── VSYNC ── */
+	if (ln < 12u) {
+		if (ln == 0u) { frames++; }
 
-    _CVBS_WAIT_UNTIL_CYC(t_sync_l + (uint32_t)(_CVBS_HSYNC_US + _CVBS_BACK_US) * 96U);
+		_CVBS_WAIT_UNTIL_CYC(t_sync_l + (uint32_t)_CVBS_VSYNC_US * 96U);
+		_CVBS_HW_SET(_sync_mask);
+		return;
+	}
 
-    if (_act) {
-        /* ピクセル開始アンカー: backporch 終了から +16cy 後に pixel 出力を固定。
-         *
-         * バックポーチ WAIT の exit jitter (0-4cy) と if+branch (~3cy) を
-         * 吸収するための 16cy マージン。事前計算済みのため他の処理はない。
-         * アンカー exit jitter = 0-4cy (≈42ns ≈ 0.18px) のみ残留する。
-         *
-         * ピクセル開始位置: t_sync_l + (4+8)µs * 96 + 16 + ~12cy overhead
-         * = t_sync_l + ~1180cy ≈ 12.3µs 後に VIDEO 開始。               */
-        _CVBS_WAIT_UNTIL_CYC(t_sync_l +
-            (uint32_t)(_CVBS_HSYNC_US + _CVBS_BACK_US) * 96U + 16U);
+	/* ── HSYNC終了 ── */
+	_CVBS_WAIT_UNTIL_CYC(t_sync_l + (uint32_t)_CVBS_HSYNC_US * 96U);
+	_CVBS_HW_SET(_sync_mask);
 
-        for (int col = 0; col < 32; col++) {
-            uint8_t ch  = _vrow[col];
-            uint8_t pat = (ch >= _pcg_first)
-                ? screen_pcg[(ch - _pcg_first) * 8u + (uint8_t)_sr]
-                : _cvbs_font[ch * 8 + (uint8_t)_sr];
+	/* ── アクティブ判定と事前計算 ── */
+	const uint8_t _pcg_first = (uint8_t)(256u - (uint32_t)SIZE_PCG);
+	bool _act = (ln >= _CVBS_ACT_FIRST &&
+				 ln <  (uint16_t)(_CVBS_ACT_FIRST + _CVBS_ACT_LINES));
 
-            uint8_t _p = pat;
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p);
-        }
-        _CVBS_HW_CLR(_video_mask);
-    }
+	int  _vln = (int)ln - _CVBS_ACT_FIRST;
+	int  _sr  = _vln & 7;
+	const uint8_t *_vrow = _act ? (vram + (_vln >> 3) * 32) : NULL;
+
+	/* ── back porch終了 ── */
+	_CVBS_WAIT_UNTIL_CYC(
+		t_sync_l + (uint32_t)(_CVBS_HSYNC_US + _CVBS_BACK_US) * 96U);
+
+	if (_act) {
+		/* ── ピクセル開始アンカー（実SYNC基準で固定） ──
+		 * +16〜+48cyで調整（小さすぎると分岐ジッタを拾う）
+		 */
+		const uint32_t pixel_anchor =
+			t_sync_l +
+			(uint32_t)(_CVBS_HSYNC_US + _CVBS_BACK_US) * 96U +
+			24U;   // ★ここは実機で微調整（16〜48推奨）
+
+		_CVBS_WAIT_UNTIL_CYC(pixel_anchor);
+
+		for (int col = 0; col < 32; col++) {
+			uint8_t ch  = _vrow[col];
+			uint8_t pat = (ch >= _pcg_first)
+				? screen_pcg[(ch - _pcg_first) * 8u + (uint8_t)_sr]
+				: _cvbs_font[ch * 8 + (uint8_t)_sr];
+
+			uint8_t _p = pat;
+			_CVBS_PIXEL(_p); _p <<= 1;
+			_CVBS_PIXEL(_p); _p <<= 1;
+			_CVBS_PIXEL(_p); _p <<= 1;
+			_CVBS_PIXEL(_p); _p <<= 1;
+			_CVBS_PIXEL(_p); _p <<= 1;
+			_CVBS_PIXEL(_p); _p <<= 1;
+			_CVBS_PIXEL(_p); _p <<= 1;
+			_CVBS_PIXEL(_p);
+		}
+
+		_CVBS_HW_CLR(_video_mask);
+	}
 }
-
 #endif /* RP2040 / MCXA1X3 ISR */
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
