@@ -36,6 +36,26 @@
 	prescale = <95>;
 };
 
+/*
+ * CVBS ピクセルクロック: CTimer2 (M7)
+ * prescale = 0 → 96MHz。MR0/MCR は video_on() で直接設定する。
+ * IRQ 41 は video_on() で irq_disable() して CPU 割り込みを防ぐ。
+ * DMA request source: kDma0RequestMuxCtimer2M0 = 35
+ */
+&ctimer2 {
+	status = "okay";
+	/* prescale デフォルト = 0 (DTSI より) → PR = 0 (96MHz) */
+};
+
+/*
+ * EDMA0 (M7): CTimer2-triggered DMA でピクセルデータを GPIO3 PDOR に転送。
+ * status = "okay" により board.c が RESET_ReleasePeripheralReset(kDMA_RST_SHIFT_RSTn)
+ * を実行し DMA0 をリセットから解放する。CH3 を直接レジスタアクセスで使用。
+ */
+&edma0 {
+	status = "okay";
+};
+
 /* Sound: CTimer0, CT0_MAT0 → D13 (P2_12) */
 &ctimer0 {
 	compatible = "nxp,ctimer-pwm";

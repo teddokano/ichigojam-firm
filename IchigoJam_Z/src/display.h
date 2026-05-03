@@ -102,6 +102,7 @@ const struct device *_cvbs_ctr;
  * GPIO3 (0x40105000):
  *   PSOR +0x44 = 0x40105044  Set output high
  *   PCOR +0x48 = 0x40105048  Set output low (clear)
+ *   PDOR +0x40 = 0x40105040  Data output register (DMA 転送先)
  *
  * CTimer1 (0x40005000):
  *   TC   +0x08 = 0x40005008  Timer Counter (prescale=95 → 1MHz = 1µs/tick)
@@ -110,6 +111,7 @@ const struct device *_cvbs_ctr;
 #define _CVBS_HW_SET(m)   do { (*(volatile uint32_t *)0x40105044U) = (m); } while (0)
 #define _CVBS_HW_CLR(m)   do { (*(volatile uint32_t *)0x40105048U) = (m); } while (0)
 #define _CVBS_TIMER_TC    (*(volatile uint32_t *)0x40005008U)
+#define _GPIO3_PDOR       0x40105040U  /* GPIO3 Data Output Register (DMA 転送先) */
 
 /* CTimer1 直接レジスタアクセス (H-sync ジッタ排除)
  *
@@ -132,6 +134,72 @@ const struct device *_cvbs_ctr;
 #define _CTIMER1_IR    (*(volatile uint32_t *)(_CTIMER1_BASE + 0x00U))
 #define _CTIMER1_MCR   (*(volatile uint32_t *)(_CTIMER1_BASE + 0x14U))
 #define _CTIMER1_MR0   (*(volatile uint32_t *)(_CTIMER1_BASE + 0x18U))
+
+/* CTimer2 レジスタ — ピクセルクロック (DMA trigger, M7)
+ *
+ * CTimer2 (0x40006000): prescale=0 → 96MHz、MR0=18 → 19cy/pixel ≈ 198ns
+ *   IR  +0x00  Interrupt Register (bit0: MR0 match flag)
+ *   TCR +0x04  Timer Control Register (bit0: CEN, bit1: CRST)
+ *   MCR +0x14  Match Control Register (bit0: MR0I, bit1: MR0R)
+ *   MR0 +0x18  Match Register 0
+ *
+ * 動作: MR0I=1, MR0R=1 → TC が 18 に達すると DMA request + TC リセット。
+ *   NVIC IRQ 41 は video_on() で irq_disable() し CPU 割り込みを無効化する。
+ *   DMA request は NVIC に依存せず、ハードウェア直接ルーティングで発生する。
+ * ZephyrにAPIがないため直叩きを使う (MCXA1X3 限定)。                    */
+#define _CTIMER2_BASE  0x40006000U
+#define _CTIMER2_IR    (*(volatile uint32_t *)(_CTIMER2_BASE + 0x00U))
+#define _CTIMER2_TCR   (*(volatile uint32_t *)(_CTIMER2_BASE + 0x04U))
+#define _CTIMER2_MCR   (*(volatile uint32_t *)(_CTIMER2_BASE + 0x14U))
+#define _CTIMER2_MR0   (*(volatile uint32_t *)(_CTIMER2_BASE + 0x18U))
+
+/* DMA0 チャンネル3 レジスタ — ピクセル PDOR 転送 (M7)
+ *
+ * MCXA153 は EDMA3 IP。DMA0 ベース: 0x40080000。
+ * 各チャンネルは 0x1000 オフセット: CH[n] = 0x40080000 + 0x1000 + n*0x1000。
+ * CH3 = 0x40084000 (LPUART0/1/2 は CH0-2 を使用可能だが CONFIG では DMA 無効)。
+ *
+ * チャンネルオフセット (CH ベースから):
+ *   CH_CSR  +0x00  Channel Control (bit0: ERQ, bit30: DONE(W1C))
+ *   CH_MUX  +0x14  Channel MUX: DMA request source 35 = kDma0RequestMuxCtimer2M0
+ *
+ * TCD オフセット (CH ベースから):
+ *   SADDR   +0x20  Source address
+ *   SOFF    +0x24  Source offset (int16_t, +4 = 32bit increment)
+ *   ATTR    +0x26  Transfer attributes (SSIZE/DSIZE: 2=32bit)
+ *   NBYTES  +0x28  Minor loop byte count (4 bytes = 1 pixel)
+ *   SLAST   +0x2C  Source last address adjustment (-(256*4) to reset)
+ *   DADDR   +0x30  Destination address (GPIO3 PDOR = 0x40105040)
+ *   DOFF    +0x34  Destination offset (0 = fixed)
+ *   CITER   +0x36  Current major loop count (int16_t, 256)
+ *   DLAST   +0x38  Destination last address adjustment (0)
+ *   TCD_CSR +0x3C  TCD control (bit0: START SW trigger, bit3: DREQ)
+ *   BITER   +0x3E  Beginning major loop count (256)
+ *
+ * 転送設定: 1 minor loop = 4 bytes = 1 pixel。Major loop = 256 回。
+ *   DREQ=1: 256 転送完了後に ERQ を自動クリア (次ラインまで DMA 停止)。
+ * ZephyrにAPIがないため直叩きを使う (MCXA1X3 限定)。                    */
+#define _DMA_CH         3U
+#define _DMA0_BASE      0x40080000U
+#define _DMA_CH_BASE    (_DMA0_BASE + 0x1000U + (_DMA_CH) * 0x1000U)
+#define _DMA_CH_CSR     (*(volatile uint32_t *)(_DMA_CH_BASE + 0x00U))
+#define _DMA_CH_MUX     (*(volatile uint32_t *)(_DMA_CH_BASE + 0x14U))
+#define _DMA_TCD_SADDR  (*(volatile uint32_t *)(_DMA_CH_BASE + 0x20U))
+#define _DMA_TCD_SOFF   (*(volatile uint16_t *)(_DMA_CH_BASE + 0x24U))
+#define _DMA_TCD_ATTR   (*(volatile uint16_t *)(_DMA_CH_BASE + 0x26U))
+#define _DMA_TCD_NBYTES (*(volatile uint32_t *)(_DMA_CH_BASE + 0x28U))
+#define _DMA_TCD_SLAST  (*(volatile uint32_t *)(_DMA_CH_BASE + 0x2CU))
+#define _DMA_TCD_DADDR  (*(volatile uint32_t *)(_DMA_CH_BASE + 0x30U))
+#define _DMA_TCD_DOFF   (*(volatile uint16_t *)(_DMA_CH_BASE + 0x34U))
+#define _DMA_TCD_CITER  (*(volatile uint16_t *)(_DMA_CH_BASE + 0x36U))
+#define _DMA_TCD_DLAST  (*(volatile uint32_t *)(_DMA_CH_BASE + 0x38U))
+#define _DMA_TCD_CSR    (*(volatile uint16_t *)(_DMA_CH_BASE + 0x3CU))
+#define _DMA_TCD_BITER  (*(volatile uint16_t *)(_DMA_CH_BASE + 0x3EU))
+
+/* ピクセルバッファ: 2 ライン × 256 ピクセル × 4 bytes = 2KB
+ * DMA が _vbuf[cur] を読む間、ISR が _vbuf[next] を展開 (ダブルバッファ)。
+ * バッファ選択: cur = ln & 1 (現ラインの LSB)、next = cur ^ 1。           */
+static uint32_t _vbuf[2][256];
 
 /* PORT3 PCR (Pin Control Register) — CVBS GPIO スルーレート設定
  *
@@ -318,6 +386,36 @@ void _cvbs_line_cb(const struct device *dev, uint8_t chan,
  *   exit 精度 ~0-3cy (≈31ns ≈ 0.25px @ 18cy/pixel)。                   */
 static uint32_t _cvbs_cy_phase;
 
+/* _expand_line: 1ラインのピクセル PDOR 値を buf[256] に展開する (M7)
+ *
+ * buf      : 転送先 uint32_t[256] (_vbuf[0] or _vbuf[1])
+ * vrow     : vram の対象行先頭ポインタ (32 文字)
+ * sr       : スキャン行 (0-7)
+ * pdor_base: GPIO3 PDOR の現在値から sync/video ビットを除いた値
+ *            (OUT ピン状態を black/white ピクセル値に反映するため)
+ *
+ * 実行時間: ~2048cy @ 96MHz ≈ 21µs。
+ * __ramfunc: _cvbs_direct_isr (SRAM) から呼ばれるため Flash I-cache ミスを防ぐ。
+ * DMA が _vbuf[cur] を転送中に _vbuf[next] (別バッファ) を展開するため競合なし。 */
+static void __attribute__((section(".ramfunc")))
+_expand_line(uint32_t *buf, const uint8_t *vrow, int sr, uint32_t pdor_base)
+{
+    const uint8_t pcg_first = (uint8_t)(256u - (uint32_t)SIZE_PCG);
+    uint32_t black = pdor_base | _sync_mask;
+    uint32_t white = black | _video_mask;
+    for (int col = 0; col < 32; col++) {
+        uint8_t ch  = vrow[col];
+        uint8_t pat = (ch >= pcg_first)
+            ? screen_pcg[(ch - pcg_first) * 8u + (uint8_t)sr]
+            : _cvbs_font[ch * 8 + (uint8_t)sr];
+        /* bit7 (MSB) が画面左端。DMA は buf[0] から順に GPIO3 PDOR へ書くため
+         * MSB → LSB の順に格納する。                                       */
+        for (int b = 7; b >= 0; b--) {
+            buf[col * 8 + (7 - b)] = (pat >> b & 1) ? white : black;
+        }
+    }
+}
+
 /* MCXA153 直接 ライン ISR
  *
  * irq_connect_dynamic() により _sw_isr_table[CTimer1_IRQ] に登録される。
@@ -376,50 +474,57 @@ static void __attribute__((section(".ramfunc"))) _cvbs_direct_isr(const void *ar
     _CVBS_WAIT_UNTIL_CYC(t_sync_l + (uint32_t)_CVBS_HSYNC_US * 96U);
     _CVBS_HW_SET(_sync_mask);
 
-    /* ── アクティブライン用データをバックポーチ待機中に事前計算 ───────────
-     * SYNC=H ～ backporch 終了 = 8µs = 768cy の余裕がある。
-     * この間に vrow/sr/_pcg_first を計算しておき、backporch 終了後の
-     * コードパスを最短にしてピクセル開始位置のジッタを最小化する。       */
-    const uint8_t _pcg_first = (uint8_t)(256u - (uint32_t)SIZE_PCG);
+    /* ── アクティブライン判定 ────────────────────────────────────────────── */
     bool _act = (ln >= _CVBS_ACT_FIRST &&
                  ln <  (uint16_t)(_CVBS_ACT_FIRST + _CVBS_ACT_LINES));
-    int  _vln = (int)ln - _CVBS_ACT_FIRST;
-    int  _sr  = _vln & 7;
-    /* _act が false のとき _vln は負になる可能性がある。
-     * _vrow は _act==true のときのみ参照するため NULL で安全。            */
-    const uint8_t *_vrow = _act ? (vram + (_vln >> 3) * 32) : NULL;
 
     _CVBS_WAIT_UNTIL_CYC(t_sync_l + (uint32_t)(_CVBS_HSYNC_US + _CVBS_BACK_US) * 96U);
 
+    /* pdor_base: 現在の GPIO3 PDOR から sync/video ビットを除いた値。
+     * _expand_line に渡し black/white ピクセル値に OUT ピン状態を反映させる。
+     * バックポーチ終了直後に取得 (SYNC=H, VIDEO=L の状態)。               */
+    uint32_t _pdor_base = (*(volatile uint32_t *)_GPIO3_PDOR)
+                          & ~(_sync_mask | _video_mask);
+
     if (_act) {
-        /* ピクセル開始アンカー: backporch 終了から +16cy 後に pixel 出力を固定。
-         *
-         * バックポーチ WAIT の exit jitter (0-4cy) と if+branch (~3cy) を
-         * 吸収するための 16cy マージン。事前計算済みのため他の処理はない。
-         * アンカー exit jitter = 0-4cy (≈42ns ≈ 0.18px) のみ残留する。
-         *
-         * ピクセル開始位置: t_sync_l + (4+8)µs * 96 + 16 + ~12cy overhead
-         * = t_sync_l + ~1180cy ≈ 12.3µs 後に VIDEO 開始。               */
-        _CVBS_WAIT_UNTIL_CYC(t_sync_l +
-            (uint32_t)(_CVBS_HSYNC_US + _CVBS_BACK_US) * 96U + 16U);
+        int _cur      = (int)(ln & 1u);
+        int _next_buf = _cur ^ 1;
 
-        for (int col = 0; col < 32; col++) {
-            uint8_t ch  = _vrow[col];
-            uint8_t pat = (ch >= _pcg_first)
-                ? screen_pcg[(ch - _pcg_first) * 8u + (uint8_t)_sr]
-                : _cvbs_font[ch * 8 + (uint8_t)_sr];
+        /* DMA re-arm: _vbuf[_cur] の 256 ピクセルを GPIO3 PDOR へ自律転送。
+         *
+         * 手順:
+         *   1. SADDR を現バッファ先頭に更新
+         *   2. DONE フラグクリア (CH_CSR bit30 W1C: 1 を書くとクリア)
+         *   3. ERQ=1: DMA request を受け付ける (DREQ=1 で前ラインの完了時にクリアされた)
+         *   4. CTimer2 CRST→CEN: ピクセルクロックをバックポーチ終了に同期してリスタート
+         *   5. TCD_CSR.START=1: pixel[0] をソフトウェアトリガーで即時発火
+         *      以降 pixel[1]-pixel[255] は CTimer2 Match0 (19cy ≈ 198ns 毎) でトリガ。
+         *
+         * DMA 転送時間: 256 × 198ns ≈ 50µs。次ライン ISR (64µs後) までに完了。
+         * DREQ=1 (video_on() で設定済み): major loop 完了後 ERQ 自動クリア。   */
+        _DMA_TCD_SADDR = (uint32_t)_vbuf[_cur];
+        _DMA_CH_CSR    = (1U << 30);                         /* clear DONE (W1C) */
+        _DMA_CH_CSR   |= (1U << 0);                          /* ERQ=1            */
+        _CTIMER2_TCR   = 0x02U;                              /* CRST=1: reset    */
+        _CTIMER2_TCR   = 0x01U;                              /* CEN=1: start     */
+        _DMA_TCD_CSR   = (uint16_t)((1U << 3) | (1U << 0)); /* DREQ=1, START=1  */
 
-            uint8_t _p = pat;
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p); _p = (uint8_t)(_p << 1);
-            _CVBS_PIXEL(_p);
+        /* 次アクティブライン用バッファを DMA と並行展開。
+         * DMA は _vbuf[_cur] を読み、_expand_line は _vbuf[_next_buf] に書く。
+         * 異なるバッファへのアクセスのため競合なし (~21µs で完了, DMA より先に終わる)。 */
+        int _next_ln = (int)ln + 1;
+        if (_next_ln < _CVBS_ACT_FIRST + _CVBS_ACT_LINES) {
+            int _nvln = _next_ln - _CVBS_ACT_FIRST;
+            _expand_line(_vbuf[_next_buf],
+                         vram + (_nvln >> 3) * 32,
+                         _nvln & 7, _pdor_base);
         }
-        _CVBS_HW_CLR(_video_mask);
+    } else if (ln == (uint16_t)(_CVBS_ACT_FIRST - 1u)) {
+        /* ln=32: 次ライン (ln=33) がアクティブ開始。
+         * ln=33 の cur = 33 & 1 = 1 なので _vbuf[1] を先行展開。
+         * ln=33 の ISR は _vbuf[1] が展開済みであることを前提に DMA を起動する。 */
+        _expand_line(_vbuf[_CVBS_ACT_FIRST & 1u],
+                     vram, 0, _pdor_base);
     }
 }
 
@@ -537,6 +642,45 @@ INLINE void video_on(void) {
         __asm__ volatile ("dsb" ::: "memory");
         __asm__ volatile ("isb" ::: "memory");
     }
+
+    /* M7: CTimer2 + DMA0 CH3 初期化
+     *
+     * CTimer2 はピクセルクロックとして使用。prescale=0 (96MHz)、MR0=18 で
+     * 19cy ≈ 198ns/pixel。ISR 内でアクティブライン毎にリセット・起動する。
+     * IRQ 41 を無効化: DMA request は NVIC を経由しないためハードウェア直結で動作。
+     *
+     * DMA0 CH3 TCD: 固定フィールドを設定。SADDR は ISR で毎ライン更新する。
+     * CH_MUX=35 (kDma0RequestMuxCtimer2M0): CTimer2 Match0 → DMA CH3 trigger。
+     * ZephyrにAPIがないため直叩きを使う (MCXA1X3 限定)。                    */
+    irq_disable(41);
+    _CTIMER2_MCR = 0x02U;  /* MR0R=1: TC を MR0 一致でリセット。MR0I=0 (CPU 割り込みなし) */
+    _CTIMER2_MR0 = 18U;    /* 19cy/pixel @ 96MHz ≈ 198ns/pixel                           */
+    _CTIMER2_TCR = 0x00U;  /* 停止状態 (ISR が毎ラインリセット・起動する)                */
+
+    /* DMA0 CH3: trigger source = CTimer2 Match0 */
+    _DMA_CH_MUX = 35U;  /* kDma0RequestMuxCtimer2M0 = 35 (fsl_inputmux_connections.h) */
+
+    /* TCD 固定フィールド: 毎ライン変化しない設定を一度だけ書き込む */
+    _DMA_TCD_SOFF   = (uint16_t)4U;               /* SOFF: +4 bytes per transfer (32bit) */
+    _DMA_TCD_ATTR   = (uint16_t)((2U << 8) | 2U); /* SSIZE=2(32bit), DSIZE=2(32bit)      */
+    _DMA_TCD_NBYTES = 4U;                          /* 1 minor loop = 4 bytes = 1 pixel    */
+    _DMA_TCD_SLAST  = 0U;                          /* SLAST=0 (SADDR は ISR で毎回設定)   */
+    _DMA_TCD_DADDR  = _GPIO3_PDOR;                 /* 転送先: GPIO3 PDOR (固定)            */
+    _DMA_TCD_DOFF   = (uint16_t)0U;               /* DOFF=0 (宛先は固定アドレス)          */
+    _DMA_TCD_DLAST  = 0U;                          /* DLAST=0 (宛先は固定)                 */
+    _DMA_TCD_BITER  = (uint16_t)256U;             /* major loop 開始値 = 256 pixels       */
+    _DMA_TCD_CITER  = (uint16_t)256U;             /* 現在値 (BITER と一致させる)           */
+    _DMA_TCD_CSR    = (uint16_t)(1U << 3);        /* DREQ=1: major loop 完了後 ERQ 自動クリア */
+
+    /* _vbuf[1] を先行展開: 最初のアクティブライン ln=33 (cur = 33&1 = 1) 用。
+     * ln=32 の ISR の else branch でも展開されるが、video_on() が
+     * フレーム中途から呼ばれた場合に ln=32 ISR を逃す可能性があるため
+     * ここでも展開しておく (二重展開は無害: 同一内容で上書きされるだけ)。   */
+    {
+        uint32_t _pdor = (*(volatile uint32_t *)_GPIO3_PDOR)
+                         & ~(_sync_mask | _video_mask);
+        _expand_line(_vbuf[_CVBS_ACT_FIRST & 1u], vram, 0, _pdor);
+    }
 #endif
 
     _cvbs_on = true;
@@ -549,6 +693,11 @@ INLINE void video_off(int clkdiv) {
      * MCR bit0 をクリアし MR0 割り込みを停止する。
      * RP2040/MCXA153 ともに driver API 経由で安全に停止できる。          */
     counter_cancel_channel_alarm(_cvbs_ctr, 0);
+#if defined(CONFIG_SOC_SERIES_MCXA1X3)
+    /* M7: CTimer2 停止 + DMA CH3 無効化 */
+    _CTIMER2_TCR = 0x00U;  /* CEN=0, CRST=0: CTimer2 停止                    */
+    _DMA_CH_CSR  = 0U;     /* ERQ=0: DMA チャンネル無効化 (実行中なら完了まで継続) */
+#endif
     _CVBS_HW_CLR(_sync_mask | _video_mask);
     _cvbs_on = false;
 }

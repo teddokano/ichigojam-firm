@@ -67,8 +67,9 @@ static void _sound_timer_fn(void *a, void *b, void *c)
     while (1) {
         k_sleep(K_USEC(16666));
         psg_tick();
-#if !defined(CONFIG_SOC_SERIES_RP2040)
-        /* RP2040 では CVBS ライン ISR (_cvbs_line_cb) が
+#if !defined(CONFIG_SOC_SERIES_RP2040) && \
+    !defined(CONFIG_SOC_SERIES_MCXA1X3)
+        /* RP2040/MCXA1X3 では CVBS ライン ISR が
          * frames / _g.linecnt を更新するため、ここでは行わない。
          * 二重インクリメントすると TICK(0) が 2x 速になる。 */
         frames++;        // TICK(0) / video_waitSync frame counter
